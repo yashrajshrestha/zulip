@@ -12,7 +12,7 @@ from zerver.lib.message import bulk_access_messages
 from zerver.lib.queue import queue_json_publish
 from zerver.lib.send_email import send_future_email, FromAddress
 from zerver.lib.url_encoding import personal_narrow_url, huddle_narrow_url, \
-    stream_narrow_url, topic_narrow_url
+    topic_narrow_url
 from zerver.models import (
     Recipient,
     UserMessage,
@@ -162,29 +162,6 @@ def build_message_list(user_profile: UserProfile, messages: List[Message]) -> Li
         return {'sender': sender,
                 'content': [build_message_payload(message)]}
 
-    def message_header(user_profile: UserProfile, message: Message) -> Dict[str, Any]:
-        narrow_link = get_narrow_url(user_profile, message)
-        if message.recipient.type == Recipient.PERSONAL:
-            header = "You and %s" % (message.sender.full_name,)
-            header_html = "<a style='color: #ffffff;' href='%s'>%s</a>" % (narrow_link, header)
-        elif message.recipient.type == Recipient.HUDDLE:
-            disp_recipient = get_display_recipient(message.recipient)
-            assert not isinstance(disp_recipient, str)
-            other_recipients = [r['full_name'] for r in disp_recipient
-                                if r['id'] != user_profile.id]
-            header = "You and %s" % (", ".join(other_recipients),)
-            header_html = "<a style='color: #ffffff;' href='%s'>%s</a>" % (narrow_link, header)
-        else:
-            stream = Stream.objects.only('id', 'name').get(id=message.recipient.type_id)
-            header = "%s > %s" % (stream.name, message.topic_name())
-            stream_link = stream_narrow_url(user_profile.realm, stream)
-            narrow_link = topic_narrow_url(user_profile.realm, stream, message.topic_name())
-            header_html = "<a href='%s'>%s</a> > <a href='%s'>%s</a>" % (
-                stream_link, stream.name, narrow_link, message.topic_name())
-        return {"plain": header,
-                "html": header_html,
-                "stream_message": message.recipient.type_name() == "stream"}
-
     # # Collapse message list to
     # [
     #    {
@@ -213,10 +190,8 @@ def build_message_list(user_profile: UserProfile, messages: List[Message]) -> Li
     messages.sort(key=lambda message: message.pub_date)
 
     for message in messages:
-        header = message_header(user_profile, message)
-
         # If we want to collapse into the previous recipient block
-        if len(messages_to_render) > 0 and messages_to_render[-1]['header'] == header:
+        if len(messages_to_render) > 0:
             sender = sender_string(message)
             sender_block = messages_to_render[-1]['senders']
 
@@ -228,8 +203,7 @@ def build_message_list(user_profile: UserProfile, messages: List[Message]) -> Li
                 sender_block.append(build_sender_payload(message))
         else:
             # New recipient and sender block
-            recipient_block = {'header': header,
-                               'senders': [build_sender_payload(message)]}
+            recipient_block = {'senders': [build_sender_payload(message)]}
 
             messages_to_render.append(recipient_block)
 
@@ -352,7 +326,13 @@ def do_send_missedmessage_events_reply_in_zulip(user_profile: UserProfile,
         # TODO: When we add wildcard mentions that send emails, we
         # should make sure the right logic applies here.
     elif ('stream_email_notify' in unique_triggers):
-        context.update({'stream_email_notify': True})
+        message = missed_messages[0]['message']
+        stream = Stream.objects.only('id', 'name').get(id=message.recipient.type_id)
+        stream_header = "%s > %s" % (stream.name, message.topic_name())
+        context.update({
+            'stream_email_notify': True,
+            'stream_header': stream_header,
+        })
     else:
         raise AssertionError("Invalid messages!")
 
