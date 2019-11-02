@@ -3,117 +3,113 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to Zulip documentation!
-===============================
+Welcome to the Zulip documentation!
+===================================
 
-Zulip is a powerful, open source group chat application. Written in
-Python and using the Django framework, Zulip supports both private
-messaging and group chats via conversation streams.
+Welcome! Zulip's documentation is split into four parts:
 
-Zulip also supports fast search, drag-and-drop file uploads, image
-previews, group private messages, audible notifications, missed-message
-emails, desktop apps, and much more.
+- `User documentation <https://zulipchat.com/help>`__, for users and
+  administrators of Zulip organizations.
+- `Installation documentation <production/install.html>`__, for
+  installing and maintaining a production self-hosted Zulip installation.
+- `API documentation <https://zulipchat.com/api/>`__, for writing
+  integrations or bots using the Zulip API.
+- `Contributor documentation <overview/contributing.html>`__, for
+  developing the Zulip software, translating, submitting bug reports,
+  or making other contributions to the project.
 
-Further information on the Zulip project and its features can be found
-at `https://www.zulip.org <https://www.zulip.org>`__ and in these
-docs.  Our code is available at `our GitHub repository
-<https://github.com/zulip/>`__.
+Zulip has well over 150,000 words of documentation. If you can't find
+what you're looking for, please `let us know
+<contributing/chat-zulip-org.html>`__!  Further information on the
+Zulip project and its features can be found at `https://www.zulip.org
+<https://www.zulip.org>`__.
 
-This set of documents covers installation and contribution instructions.
+This site contains our installation and contributor documentation. If
+this is your first time here, you may want to start with `Production
+installation <production/install.html>`_ or `Contributing to Zulip
+<overview/contributing.html>`_.
 
 Contents:
 
-* :ref:`user-docs`
-* :ref:`prod-install-docs`
-* :ref:`dev-install-docs`
-* :ref:`tutorial-docs`
-* :ref:`code-docs`
-* :ref:`system-docs`
+* :ref:`Overview <overview>`
+* :ref:`Zulip in Production <zulip-in-production>`
+* :ref:`Development Environment <development-environment>`
+* :ref:`Developer Tutorials <developer-tutorials>`
+* :ref:`Git Guide <git-guide>`
+* :ref:`Code Contribution Guide <code-contribution-guide>`
+* :ref:`Code Testing <code-testing>`
+* :ref:`Subsystem Documentation <subsystem-documentation>`
+* :ref:`Writing Documentation <writing-documentation>`
+* :ref:`Translating <translating>`
 
-.. _user-docs:
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Overview
-
-   readme-symlink
-   architecture-overview
-   directory-structure
-   roadmap
-   changelog
-
-.. _prod-install-docs:
+.. _overview:
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Zulip in production
+   :maxdepth: 3
 
-   prod-requirements
-   prod-install
-   prod-troubleshooting
-   prod-customize
-   prod-maintain-secure-upgrade
-   prod-authentication-methods
-   prod-postgres
+   overview/index
 
-.. _dev-install-docs:
+.. _zulip-in-production:
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Installation for developers
+   :maxdepth: 3
 
-   dev-overview
-   dev-env-first-time-contributors
-   brief-install-vagrant-dev
-   install-ubuntu-without-vagrant-dev
-   install-generic-unix-dev
-   install-docker-dev
-   using-dev-environment
+   production/index
 
-.. _tutorial-docs:
+.. _development-environment:
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Developer tutorials
+   :maxdepth: 3
 
-   integration-guide
-   new-feature-tutorial
-   writing-views
-   life-of-a-request
+   development/index
 
-.. _code-docs:
+.. _developer-tutorials:
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Code contribution guide
+   :maxdepth: 3
 
-   version-control
-   code-style
-   testing
-   mypy
+   tutorials/index
 
-.. _system-docs:
+.. _git-guide:
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Subsystem documentation
+   :maxdepth: 3
 
-   settings
-   queuing
-   custom-apps
-   pointer
-   markdown
-   front-end-build-process
-   schema-migrations
-   html_css
-   full-text-search
-   translating
-   logging
-   README
+   git/index
 
-Indices and tables
-==================
+.. _code-contribution-guide:
 
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
+.. toctree::
+   :maxdepth: 3
+
+   contributing/index
+
+.. _code-testing:
+
+.. toctree::
+   :maxdepth: 3
+
+   testing/index
+
+.. _subsystem-documentation:
+
+.. toctree::
+   :maxdepth: 3
+
+   subsystems/index
+
+.. _writing-documentation:
+
+.. toctree::
+   :maxdepth: 3
+
+   documentation/index
+
+.. _translating:
+
+.. toctree::
+   :maxdepth: 3
+
+   translating/index
+
+   Index <https://zulip.readthedocs.io/en/latest/>

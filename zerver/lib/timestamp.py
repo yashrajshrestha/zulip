@@ -1,23 +1,44 @@
-from __future__ import absolute_import
-
 import datetime
 import calendar
-from django.utils.timezone import utc
+from django.utils.timezone import utc as timezone_utc
 
-def is_timezone_aware(datetime_object):
-    # type: (datetime.datetime) -> bool
-    return datetime_object.tzinfo is not None
+class TimezoneNotUTCException(Exception):
+    pass
 
-def timestamp_to_datetime(timestamp):
-    # type: (float) -> datetime.datetime
-    return datetime.datetime.utcfromtimestamp(float(timestamp)).replace(tzinfo=utc)
+def verify_UTC(dt: datetime.datetime) -> None:
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) != timezone_utc.utcoffset(dt):
+        raise TimezoneNotUTCException("Datetime %s does not have a UTC timezone." % (dt,))
 
-def datetime_to_timestamp(datetime_object):
-    # type: (datetime.datetime) -> int
-    return calendar.timegm(datetime_object.timetuple())
+def convert_to_UTC(dt: datetime.datetime) -> datetime.datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone_utc)
+    return dt.astimezone(timezone_utc)
 
-def datetime_to_string(datetime_object):
-    # type: (datetime.datetime) -> str
-    assert is_timezone_aware(datetime_object)
-    date_string = datetime_object.strftime('%Y-%m-%d %H:%M:%S%z')
-    return date_string
+def floor_to_hour(dt: datetime.datetime) -> datetime.datetime:
+    verify_UTC(dt)
+    return datetime.datetime(*dt.timetuple()[:4]) \
+                   .replace(tzinfo=timezone_utc)
+
+def floor_to_day(dt: datetime.datetime) -> datetime.datetime:
+    verify_UTC(dt)
+    return datetime.datetime(*dt.timetuple()[:3]) \
+                   .replace(tzinfo=timezone_utc)
+
+def ceiling_to_hour(dt: datetime.datetime) -> datetime.datetime:
+    floor = floor_to_hour(dt)
+    if floor == dt:
+        return floor
+    return floor + datetime.timedelta(hours=1)
+
+def ceiling_to_day(dt: datetime.datetime) -> datetime.datetime:
+    floor = floor_to_day(dt)
+    if floor == dt:
+        return floor
+    return floor + datetime.timedelta(days=1)
+
+def timestamp_to_datetime(timestamp: float) -> datetime.datetime:
+    return datetime.datetime.fromtimestamp(float(timestamp), tz=timezone_utc)
+
+def datetime_to_timestamp(dt: datetime.datetime) -> int:
+    verify_UTC(dt)
+    return calendar.timegm(dt.timetuple())

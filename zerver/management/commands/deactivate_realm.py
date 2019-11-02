@@ -1,30 +1,22 @@
-from __future__ import absolute_import
-from __future__ import print_function
-
+from argparse import ArgumentParser
 from typing import Any
 
-from django.core.management.base import BaseCommand
-
-from argparse import ArgumentParser
-import sys
-
 from zerver.lib.actions import do_deactivate_realm
-from zerver.models import get_realm
+from zerver.lib.management import ZulipBaseCommand
 
-class Command(BaseCommand):
+class Command(ZulipBaseCommand):
     help = """Script to deactivate a realm."""
 
-    def add_arguments(self, parser):
-        # type: (ArgumentParser) -> None
-        parser.add_argument('domain', metavar='<domain>', type=str,
-                            help='domain of realm to deactivate')
+    def add_arguments(self, parser: ArgumentParser) -> None:
+        self.add_realm_args(parser, True)
 
-    def handle(self, *args, **options):
-        # type: (*Any, **str) -> None
-        realm = get_realm(options["domain"])
-        if realm is None:
-            print("Could not find realm %s" % (options["domain"],))
-            sys.exit(1)
-        print("Deactivating", options["domain"])
+    def handle(self, *args: Any, **options: str) -> None:
+        realm = self.get_realm(options)
+        assert realm is not None  # Should be ensured by parser
+
+        if realm.deactivated:
+            print("The realm", options["realm_id"], "is already deactivated.")
+            exit(0)
+        print("Deactivating", options["realm_id"])
         do_deactivate_realm(realm)
         print("Done!")

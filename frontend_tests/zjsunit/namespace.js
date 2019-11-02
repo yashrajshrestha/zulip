@@ -1,7 +1,4 @@
-var namespace = (function () {
-
-var _ = require('third/underscore/underscore.js');
-var exports = {};
+var _ = require('underscore/underscore.js');
 
 var dependencies = [];
 var requires = [];
@@ -19,12 +16,18 @@ exports.patch_builtin = function (name, val) {
     return val;
 };
 
-exports.add_dependencies = function (dct) {
-    _.each(dct, function (fn, name) {
-        var obj = require(fn);
-        requires.push(fn);
-        set_global(name, obj);
-    });
+exports.zrequire = function (name, fn) {
+    if (fn === undefined) {
+        fn = '../../static/js/' + name;
+    } else if (/^generated\/|^js\/|^shared\/|^third\//.test(fn)) {
+        // FIXME: Stealing part of the NPM namespace is confusing.
+        fn = '../../static/' + fn;
+    }
+    delete require.cache[require.resolve(fn)];
+    var obj = require(fn);
+    requires.push(fn);
+    set_global(name, obj);
+    return obj;
 };
 
 exports.restore = function () {
@@ -35,6 +38,7 @@ exports.restore = function () {
         delete require.cache[require.resolve(fn)];
     });
     dependencies = [];
+    delete global.window.electron_bridge;
     _.extend(global, old_builtins);
     old_builtins = {};
 };
@@ -44,13 +48,43 @@ exports.stub_out_jquery = function () {
         return {
             on: function () {},
             trigger: function () {},
-            hide: function () {}
+            hide: function () {},
+            removeClass: function () {},
         };
     });
     $.fn = {};
     $.now = function () {};
 };
 
-return exports;
-}());
-module.exports = namespace;
+exports.with_overrides = function (test_function) {
+    // This function calls test_function() and passes in
+    // a way to override the namespace temporarily.
+
+    var clobber_callbacks = [];
+
+    var override = function (name, f) {
+        var parts = name.split('.');
+        var module = parts[0];
+        var func_name = parts[1];
+
+        if (!_.has(global, module)) {
+            set_global(module, {});
+        }
+
+        global[module][func_name] = f;
+
+        clobber_callbacks.push(function () {
+            // If you get a failure from this, you probably just
+            // need to have your test do its own overrides and
+            // not cherry-pick off of the prior test's setup.
+            global[module][func_name] =
+                'ATTEMPTED TO REUSE OVERRIDDEN VALUE FROM PRIOR TEST';
+        });
+    };
+
+    test_function(override);
+
+    _.each(clobber_callbacks, function (f) {
+        f();
+    });
+};

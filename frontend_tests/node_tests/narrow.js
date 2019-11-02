@@ -1,103 +1,366 @@
-add_dependencies({
-    stream_data: 'js/stream_data.js',
-    Filter: 'js/filter.js'
+set_global('$', global.make_zjquery());
+zrequire('hash_util');
+zrequire('hashchange');
+zrequire('narrow_state');
+zrequire('people');
+zrequire('stream_data');
+zrequire('util');
+zrequire('Filter', 'js/filter');
+set_global('i18n', global.stub_i18n);
+set_global('page_params', {
+    stop_words: ['what', 'about'],
 });
 
-var narrow = require('js/narrow.js');
-var Filter = global.Filter;
-var stream_data = global.stream_data;
-var _ = global._;
+zrequire('narrow');
 
 function set_filter(operators) {
     operators = _.map(operators, function (op) {
         return {operator: op[0], operand: op[1]};
     });
-    narrow._set_current_filter(new Filter(operators));
+    narrow_state.set_current_filter(new Filter(operators));
 }
 
-(function test_stream() {
-    set_filter([['stream', 'Foo'], ['topic', 'Bar'], ['search', 'yo']]);
+var me = {
+    email: 'me@example.com',
+    user_id: 5,
+    full_name: 'Me Myself',
+};
 
-    assert.equal(narrow.stream(), 'Foo');
-}());
+var alice = {
+    email: 'alice@example.com',
+    user_id: 23,
+    full_name: 'Alice Smith',
+};
 
+var ray = {
+    email: 'ray@example.com',
+    user_id: 22,
+    full_name: 'Raymond',
+};
 
-(function test_narrowed() {
-    narrow._set_current_filter(undefined); // not narrowed, basically
-    assert(!narrow.narrowed_to_pms());
-    assert(!narrow.narrowed_by_reply());
-    assert(!narrow.narrowed_to_search());
-    assert(!narrow.narrowed_to_topic());
-
-    set_filter([['stream', 'Foo']]);
-    assert(!narrow.narrowed_to_pms());
-    assert(!narrow.narrowed_by_reply());
-    assert(!narrow.narrowed_to_search());
-    assert(!narrow.narrowed_to_topic());
-
-    set_filter([['pm-with', 'steve@zulip.com']]);
-    assert(narrow.narrowed_to_pms());
-    assert(narrow.narrowed_by_reply());
-    assert(!narrow.narrowed_to_search());
-    assert(!narrow.narrowed_to_topic());
-
-    set_filter([['stream', 'Foo'], ['topic', 'bar']]);
-    assert(!narrow.narrowed_to_pms());
-    assert(narrow.narrowed_by_reply());
-    assert(!narrow.narrowed_to_search());
-    assert(narrow.narrowed_to_topic());
-
-    set_filter([['search', 'grail']]);
-    assert(!narrow.narrowed_to_pms());
-    assert(!narrow.narrowed_by_reply());
-    assert(narrow.narrowed_to_search());
-    assert(!narrow.narrowed_to_topic());
-}());
-
-(function test_operators() {
+run_test('stream_topic', () => {
     set_filter([['stream', 'Foo'], ['topic', 'Bar'], ['search', 'Yo']]);
-    var result = narrow.operators();
-    assert.equal(result.length, 3);
-    assert.equal(result[0].operator, 'stream');
-    assert.equal(result[0].operand, 'Foo');
 
-    assert.equal(result[1].operator, 'topic');
-    assert.equal(result[1].operand, 'Bar');
+    set_global('current_msg_list', {
+    });
 
-    assert.equal(result[2].operator, 'search');
-    assert.equal(result[2].operand, 'yo');
-}());
+    global.current_msg_list.selected_message = function () {};
 
-(function test_muting_enabled() {
-    set_filter([['stream', 'devel']]);
-    assert(narrow.muting_enabled());
+    var stream_topic = narrow.stream_topic();
 
-    narrow._set_current_filter(undefined); // not narrowed, basically
-    assert(narrow.muting_enabled());
+    assert.deepEqual(stream_topic, {
+        stream: 'Foo',
+        topic: 'Bar',
+    });
 
-    set_filter([['stream', 'devel'], ['topic', 'mac']]);
-    assert(!narrow.muting_enabled());
+    global.current_msg_list.selected_message = function () {
+        return {
+            stream: 'Stream1',
+            topic: 'Topic1',
+        };
+    };
 
-    set_filter([['search', 'whatever']]);
-    assert(!narrow.muting_enabled());
+    stream_topic = narrow.stream_topic();
+
+    assert.deepEqual(stream_topic, {
+        stream: 'Stream1',
+        topic: 'Topic1',
+    });
+
+});
+
+run_test('uris', () => {
+    people.add(ray);
+    people.add(alice);
+    people.add(me);
+    people.initialize_current_user(me.user_id);
+
+    var uri = hash_util.pm_with_uri(ray.email);
+    assert.equal(uri, '#narrow/pm-with/22-ray');
+
+    uri = hash_util.huddle_with_uri("22,23");
+    assert.equal(uri, '#narrow/pm-with/22,23-group');
+
+    uri = hash_util.by_sender_uri(ray.email);
+    assert.equal(uri, '#narrow/sender/22-ray');
+
+    var emails = global.hash_util.decode_operand('pm-with', '22,23-group');
+    assert.equal(emails, 'alice@example.com,ray@example.com');
+
+    emails = global.hash_util.decode_operand('pm-with', '5,22,23-group');
+    assert.equal(emails, 'alice@example.com,ray@example.com');
+
+    emails = global.hash_util.decode_operand('pm-with', '5-group');
+    assert.equal(emails, 'me@example.com');
+});
+
+run_test('show_empty_narrow_message', () => {
+    narrow_state.reset_current_filter();
+    narrow.show_empty_narrow_message();
+    assert.equal($('.empty_feed_notice').visible(), false);
+    assert($('#empty_narrow_message').visible());
+    assert.equal(
+        $('#left_bar_compose_reply_button_big').attr('title'),
+        'translated: There are no messages to reply to.'
+    );
+
+    // for non-existent or private stream
+    set_filter([['stream', 'Foo']]);
+    narrow.show_empty_narrow_message();
+    assert($('#nonsubbed_private_nonexistent_stream_narrow_message').visible());
+
+    // for non sub public stream
+    stream_data.add_sub('ROME', {name: 'ROME', stream_id: 99});
+    stream_data.update_calculated_fields(stream_data.get_sub("ROME"));
+    set_filter([['stream', 'Rome']]);
+    narrow.show_empty_narrow_message();
+    assert($('#nonsubbed_stream_narrow_message').visible());
+
+    set_filter([['is', 'starred']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_star_narrow_message').visible());
+
+    set_filter([['is', 'mentioned']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_narrow_all_mentioned').visible());
 
     set_filter([['is', 'private']]);
-    assert(!narrow.muting_enabled());
+    narrow.show_empty_narrow_message();
+    assert($('#empty_narrow_all_private_message').visible());
 
-}());
+    set_filter([['is', 'unread']]);
+    narrow.show_empty_narrow_message();
+    assert($('#no_unread_narrow_message').visible());
 
-(function test_set_compose_defaults() {
-    set_filter([['stream', 'Foo'], ['topic', 'Bar']]);
+    set_filter([['pm-with', ['Yo']]]);
+    narrow.show_empty_narrow_message();
+    assert($('#non_existing_user').visible());
 
-    var opts = {};
-    narrow.set_compose_defaults(opts);
-    assert.equal(opts.stream, 'Foo');
-    assert.equal(opts.subject, 'Bar');
+    people.add_in_realm(alice);
+    set_filter([['pm-with', ['alice@example.com', 'Yo']]]);
+    narrow.show_empty_narrow_message();
+    assert($('#non_existing_users').visible());
 
+    set_filter([['pm-with', 'alice@example.com']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_narrow_private_message').visible());
+
+    set_filter([['group-pm-with', 'alice@example.com']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_narrow_group_private_message').visible());
+
+    set_filter([['sender', 'ray@example.com']]);
+    narrow.show_empty_narrow_message();
+    assert($('#silent_user').visible());
+
+    set_filter([['sender', 'sinwar@example.com']]);
+    narrow.show_empty_narrow_message();
+    assert($('#non_existing_user').visible());
+
+    var display = $("#empty_search_stop_words_string");
+
+    var items = [];
+    display.append = (html) => {
+        items.push(html);
+    };
+
+    set_filter([['search', 'grail']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_search_narrow_message').visible());
+
+    assert.equal(items.length, 2);
+    assert.equal(items[0], ' ');
+    assert.equal(items[1].text(), 'grail');
+});
+
+run_test('show_search_stopwords', () => {
+    narrow_state.reset_current_filter();
+    var items = [];
+
+    var display = $("#empty_search_stop_words_string");
+
+    display.append = (html) => {
+        if (html.text) {
+            items.push(html.selector + html.text());
+        }
+    };
+
+    set_filter([['search', 'what about grail']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_search_narrow_message').visible());
+
+    assert.equal(items.length, 3);
+    assert.equal(items[0], '<del>what');
+    assert.equal(items[1], '<del>about');
+    assert.equal(items[2], '<span>grail');
+
+    items = [];
+    set_filter([['stream', 'streamA'], ['search', 'what about grail']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_search_narrow_message').visible());
+
+    assert.equal(items.length, 4);
+    assert.equal(items[0], '<span>stream: streamA');
+    assert.equal(items[1], '<del>what');
+    assert.equal(items[2], '<del>about');
+    assert.equal(items[3], '<span>grail');
+
+    items = [];
+    set_filter([['stream', 'streamA'], ['topic', 'topicA'], ['search', 'what about grail']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_search_narrow_message').visible());
+
+    assert.equal(items.length, 4);
+    assert.equal(items[0], '<span>stream: streamA topic: topicA');
+    assert.equal(items[1], '<del>what');
+    assert.equal(items[2], '<del>about');
+    assert.equal(items[3], '<span>grail');
+});
+
+run_test('show_invalid_narrow_message', () => {
+    narrow_state.reset_current_filter();
+    var display = $("#empty_search_stop_words_string");
+
+    stream_data.add_sub('streamA', {name: 'streamA', stream_id: 88});
+    stream_data.add_sub('streamB', {name: 'streamB', stream_id: 77});
+
+    set_filter([['stream', 'streamA'], ['stream', 'streamB']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_search_narrow_message').visible());
+    assert.equal(display.text(), 'translated: You are searching for messages that belong to more than one stream, which is not possible.');
+
+    set_filter([['topic', 'topicA'], ['topic', 'topicB']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_search_narrow_message').visible());
+    assert.equal(display.text(), 'translated: You are searching for messages that belong to more than one topic, which is not possible.');
+
+    people.add_in_realm(ray);
+    people.add_in_realm(alice);
+
+    set_filter([['sender', 'alice@example.com'], ['sender', 'ray@example.com']]);
+    narrow.show_empty_narrow_message();
+    assert($('#empty_search_narrow_message').visible());
+    assert.equal(display.text(), 'translated: You are searching for messages that are sent by more than one person, which is not possible.');
+});
+
+run_test('narrow_to_compose_target', () => {
+    set_global('compose_state', {});
+    set_global('topic_data', {});
+    const args = {called: false};
+    const activate_backup = narrow.activate;
+    narrow.activate = function (operators, opts) {
+        args.operators = operators;
+        args.opts = opts;
+        args.called = true;
+    };
+
+    // No-op when not composing.
+    global.compose_state.composing = () => false;
+    narrow.to_compose_target();
+    assert.equal(args.called, false);
+    global.compose_state.composing = () => true;
+
+    // No-op when empty stream.
+    global.compose_state.get_message_type = () => 'stream';
+    global.compose_state.stream_name = () => '';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, false);
+
+    // --- Tests for stream messages ---
+    global.compose_state.get_message_type = () => 'stream';
     stream_data.add_sub('ROME', {name: 'ROME', stream_id: 99});
-    set_filter([['stream', 'rome']]);
+    global.compose_state.stream_name = () => 'ROME';
+    global.topic_data.get_recent_names = () => ['one', 'two', 'three'];
 
-    opts = {};
-    narrow.set_compose_defaults(opts);
-    assert.equal(opts.stream, 'ROME');
-}());
+    // Test with existing topic
+    global.compose_state.topic = () => 'one';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.equal(args.opts.trigger, 'narrow_to_compose_target');
+    assert.deepEqual(args.operators, [
+        {operator: 'stream', operand: 'ROME'},
+        {operator: 'topic', operand: 'one'},
+    ]);
+
+    // Test with new topic
+    global.compose_state.topic = () => 'four';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'stream', operand: 'ROME'},
+    ]);
+
+    // Test with blank topic
+    global.compose_state.topic = () => '';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'stream', operand: 'ROME'},
+    ]);
+
+    // Test with no topic
+    global.compose_state.topic = () => {};
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'stream', operand: 'ROME'},
+    ]);
+
+    // --- Tests for PMs ---
+    global.compose_state.get_message_type = () => 'private';
+    people.add_in_realm(ray);
+    people.add_in_realm(alice);
+    people.add_in_realm(me);
+
+    // Test with valid person
+    global.compose_state.recipient = () => 'alice@example.com';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'pm-with', operand: 'alice@example.com'},
+    ]);
+
+    // Test with valid persons
+    global.compose_state.recipient = () => 'alice@example.com,ray@example.com';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'pm-with', operand: 'alice@example.com,ray@example.com'},
+    ]);
+
+    // Test with some inavlid persons
+    global.compose_state.recipient = () => 'alice@example.com,random,ray@example.com';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'is', operand: 'private'},
+    ]);
+
+    // Test with all inavlid persons
+    global.compose_state.recipient = () => 'alice,random,ray';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'is', operand: 'private'},
+    ]);
+
+    // Test with no persons
+    global.compose_state.recipient = () => '';
+    args.called = false;
+    narrow.to_compose_target();
+    assert.equal(args.called, true);
+    assert.deepEqual(args.operators, [
+        {operator: 'is', operand: 'private'},
+    ]);
+
+    narrow.activate = activate_backup;
+});

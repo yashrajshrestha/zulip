@@ -1,60 +1,90 @@
+import os
+import time
 from argparse import ArgumentParser
-from datetime import timedelta
+from typing import Any, Dict
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
-from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.utils.timezone import now as timezone_now
+from django.utils.timezone import utc as timezone_utc
 
-from analytics.models import RealmCount, UserCount
-from analytics.lib.counts import COUNT_STATS, CountStat, process_count_stat
-from zerver.lib.timestamp import datetime_to_string, is_timezone_aware
-from zerver.models import UserProfile, Message
-
-from typing import Any
+from analytics.lib.counts import COUNT_STATS, logger, process_count_stat
+from scripts.lib.zulip_tools import ENDC, WARNING
+from zerver.lib.remote_server import send_analytics_to_remote_server
+from zerver.lib.timestamp import floor_to_hour
+from zerver.models import Realm
 
 class Command(BaseCommand):
     help = """Fills Analytics tables.
 
     Run as a cron job that runs every hour."""
 
-    def add_arguments(self, parser):
-        # type: (ArgumentParser) -> None
-        parser.add_argument('--range-start', '-s',
+    def add_arguments(self, parser: ArgumentParser) -> None:
+        parser.add_argument('--time', '-t',
                             type=str,
-                            help="Time to backfill from.")
-        parser.add_argument('--range-end', '-e',
-                            type=str,
-                            help='Time to backfill to, defaulst to now.',
-                            default=datetime_to_string(timezone.now()))
+                            help='Update stat tables from current state to'
+                                 '--time. Defaults to the current time.',
+                            default=timezone_now().isoformat())
         parser.add_argument('--utc',
-                            type=bool,
-                            help="Interpret --range-start and --range-end as times in UTC.",
+                            action='store_true',
+                            help="Interpret --time in UTC.",
                             default=False)
-        parser.add_argument('--stat', '-q',
+        parser.add_argument('--stat', '-s',
                             type=str,
-                            help="CountStat to process. If omitted, all stats are processed")
+                            help="CountStat to process. If omitted, all stats are processed.")
+        parser.add_argument('--verbose',
+                            action='store_true',
+                            help="Print timing information to stdout.",
+                            default=False)
 
-    def handle(self, *args, **options):
-        # type: (*Any, **Any) -> None
-        range_end = parse_datetime(options['range_end'])
-        if options['range_start'] is not None:
-            range_start = parse_datetime(options['range_start'])
-        else:
-            range_start = range_end - timedelta(seconds = 3600)
+    def handle(self, *args: Any, **options: Any) -> None:
+        try:
+            os.mkdir(settings.ANALYTICS_LOCK_DIR)
+        except OSError:
+            print(WARNING + "Analytics lock %s is unavailable; exiting... " + ENDC)
+            return
 
-        # throw error if start time is greater than end time
-        if range_start > range_end:
-            raise ValueError("--range-start cannot be greater than --range-end.")
+        try:
+            self.run_update_analytics_counts(options)
+        finally:
+            os.rmdir(settings.ANALYTICS_LOCK_DIR)
 
+    def run_update_analytics_counts(self, options: Dict[str, Any]) -> None:
+        # installation_epoch relies on there being at least one realm; we
+        # shouldn't run the analytics code if that condition isn't satisfied
+        if not Realm.objects.exists():
+            logger.info("No realms, stopping update_analytics_counts")
+            return
+
+        fill_to_time = parse_datetime(options['time'])
         if options['utc']:
-            range_start = range_start.replace(tzinfo=timezone.utc)
-            range_end = range_end.replace(tzinfo=timezone.utc)
+            fill_to_time = fill_to_time.replace(tzinfo=timezone_utc)
+        if fill_to_time.tzinfo is None:
+            raise ValueError("--time must be timezone aware. Maybe you meant to use the --utc option?")
 
-        if not (is_timezone_aware(range_start) and is_timezone_aware(range_end)):
-            raise ValueError("--range-start and --range-end must be timezone aware. Maybe you meant to use the --utc option?")
+        fill_to_time = floor_to_hour(fill_to_time.astimezone(timezone_utc))
 
         if options['stat'] is not None:
-            process_count_stat(COUNT_STATS[options['stat']], range_start, range_end)
+            stats = [COUNT_STATS[options['stat']]]
         else:
-            for stat in COUNT_STATS.values():
-                process_count_stat(stat, range_start, range_end)
+            stats = list(COUNT_STATS.values())
+
+        logger.info("Starting updating analytics counts through %s" % (fill_to_time,))
+        if options['verbose']:
+            start = time.time()
+            last = start
+
+        for stat in stats:
+            process_count_stat(stat, fill_to_time)
+            if options['verbose']:
+                print("Updated %s in %.3fs" % (stat.property, time.time() - last))
+                last = time.time()
+
+        if options['verbose']:
+            print("Finished updating analytics counts through %s in %.3fs" %
+                  (fill_to_time, time.time() - start))
+        logger.info("Finished updating analytics counts through %s" % (fill_to_time,))
+
+        if settings.PUSH_NOTIFICATION_BOUNCER_URL and settings.SUBMIT_USAGE_STATISTICS:
+            send_analytics_to_remote_server()

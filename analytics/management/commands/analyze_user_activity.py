@@ -1,25 +1,19 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+import datetime
 from typing import Any, Dict
 
-from zerver.lib.statistics import seconds_usage_between
-
-from optparse import make_option
-from django.core.management.base import BaseCommand
-from zerver.models import UserProfile
-import datetime
+from django.core.management.base import BaseCommand, CommandParser
 from django.utils.timezone import utc
 
-def analyze_activity(options):
-    # type: (Dict[str, Any]) -> None
+from zerver.lib.statistics import seconds_usage_between
+from zerver.models import UserProfile
+
+def analyze_activity(options: Dict[str, Any]) -> None:
     day_start = datetime.datetime.strptime(options["date"], "%Y-%m-%d").replace(tzinfo=utc)
     day_end = day_start + datetime.timedelta(days=options["duration"])
 
     user_profile_query = UserProfile.objects.all()
     if options["realm"]:
-        user_profile_query = user_profile_query.filter(realm__domain=options["realm"])
+        user_profile_query = user_profile_query.filter(realm__string_id=options["realm"])
 
     print("Per-user online duration:\n")
     total_duration = datetime.timedelta(0)
@@ -47,18 +41,16 @@ It will correctly not count server-initiated reloads in the activity statistics.
 
 The duration flag can be used to control how many days to show usage duration for
 
-Usage: python manage.py analyze_user_activity [--realm=zulip.com] [--date=2013-09-10] [--duration=1]
+Usage: ./manage.py analyze_user_activity [--realm=zulip] [--date=2013-09-10] [--duration=1]
 
 By default, if no date is selected 2013-09-10 is used. If no realm is provided, information
 is shown for all realms"""
 
-    option_list = BaseCommand.option_list + (
-        make_option('--realm', action='store'),
-        make_option('--date', action='store', default="2013-09-06"),
-        make_option('--duration', action='store', default=1, type=int,
-                    help="How many days to show usage information for"),
-        )
+    def add_arguments(self, parser: CommandParser) -> None:
+        parser.add_argument('--realm', action='store')
+        parser.add_argument('--date', action='store', default="2013-09-06")
+        parser.add_argument('--duration', action='store', default=1, type=int,
+                            help="How many days to show usage information for")
 
-    def handle(self, *args, **options):
-        # type: (*Any, **Any) -> None
+    def handle(self, *args: Any, **options: Any) -> None:
         analyze_activity(options)

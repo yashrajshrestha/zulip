@@ -1,60 +1,93 @@
-from __future__ import print_function
-
 import os
 import hashlib
-from os.path import dirname, abspath
+import json
+import shutil
 
-if False:
-    from typing import Optional, List, Tuple
-
+from typing import Optional, List, IO, Any
 from scripts.lib.zulip_tools import subprocess_text_output, run
 
-ZULIP_PATH = dirname(dirname(dirname(abspath(__file__))))
-NPM_CACHE_PATH = "/srv/zulip-npm-cache"
+ZULIP_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ZULIP_SRV_PATH = "/srv"
 
 if 'TRAVIS' in os.environ:
     # In Travis CI, we don't have root access
-    NPM_CACHE_PATH = "/home/travis/zulip-npm-cache"
+    ZULIP_SRV_PATH = "/home/travis"
 
-def setup_node_modules(npm_args=None, stdout=None, stderr=None, copy_modules=False):
-    # type: (Optional[List[str]], Optional[str], Optional[str], Optional[bool]) -> None
+
+NODE_MODULES_CACHE_PATH = os.path.join(ZULIP_SRV_PATH, 'zulip-npm-cache')
+YARN_BIN = os.path.join(ZULIP_SRV_PATH, 'zulip-yarn/bin/yarn')
+YARN_PACKAGE_JSON = os.path.join(ZULIP_SRV_PATH, 'zulip-yarn/package.json')
+
+DEFAULT_PRODUCTION = False
+
+def get_yarn_args(production):
+    # type: (bool) -> List[str]
+    if production:
+        yarn_args = ["--prod"]
+    else:
+        yarn_args = []
+    return yarn_args
+
+def generate_sha1sum_node_modules(setup_dir=None, production=DEFAULT_PRODUCTION):
+    # type: (Optional[str], bool) -> str
+    if setup_dir is None:
+        setup_dir = os.path.realpath(os.getcwd())
+    PACKAGE_JSON_FILE_PATH = os.path.join(setup_dir, 'package.json')
+    YARN_LOCK_FILE_PATH = os.path.join(setup_dir, 'yarn.lock')
     sha1sum = hashlib.sha1()
-    sha1sum.update(subprocess_text_output(['cat', 'package.json']).encode('utf8'))
-    sha1sum.update(subprocess_text_output(['npm', '--version']).encode('utf8'))
+    sha1sum.update(subprocess_text_output(['cat', PACKAGE_JSON_FILE_PATH]).encode('utf8'))
+    if os.path.exists(YARN_LOCK_FILE_PATH):
+        # For backwards compatibility, we can't assume yarn.lock exists
+        sha1sum.update(subprocess_text_output(['cat', YARN_LOCK_FILE_PATH]).encode('utf8'))
+    with open(YARN_PACKAGE_JSON, "r") as f:
+        yarn_version = json.loads(f.read())['version']
+        sha1sum.update(yarn_version.encode("utf8"))
     sha1sum.update(subprocess_text_output(['node', '--version']).encode('utf8'))
-    if npm_args is not None:
-        sha1sum.update(''.join(sorted(npm_args)).encode('utf8'))
+    yarn_args = get_yarn_args(production=production)
+    sha1sum.update(''.join(sorted(yarn_args)).encode('utf8'))
+    return sha1sum.hexdigest()
 
-    npm_cache = os.path.join(NPM_CACHE_PATH, sha1sum.hexdigest())
-    cached_node_modules = os.path.join(npm_cache, 'node_modules')
-    success_stamp = os.path.join(cached_node_modules, '.success-stamp')
+def setup_node_modules(production=DEFAULT_PRODUCTION, stdout=None, stderr=None,
+                       prefer_offline=False):
+    # type: (bool, Optional[IO[Any]], Optional[IO[Any]], bool) -> None
+    yarn_args = get_yarn_args(production=production)
+    if prefer_offline:
+        yarn_args.append("--prefer-offline")
+    sha1sum = generate_sha1sum_node_modules(production=production)
+    target_path = os.path.join(NODE_MODULES_CACHE_PATH, sha1sum)
+    cached_node_modules = os.path.join(target_path, 'node_modules')
+    success_stamp = os.path.join(target_path, '.success-stamp')
     # Check if a cached version already exists
     if not os.path.exists(success_stamp):
-        do_npm_install(npm_cache, npm_args or [], stdout, stderr, copy_modules)
+        do_yarn_install(target_path,
+                        yarn_args,
+                        success_stamp,
+                        stdout=stdout,
+                        stderr=stderr)
 
     print("Using cached node modules from %s" % (cached_node_modules,))
-    cmds = [
-        ['rm', '-rf', 'node_modules'],
-        ["ln", "-nsf", cached_node_modules, 'node_modules'],
-        ['touch', success_stamp],
-    ]
-    for cmd in cmds:
-        run(cmd, stdout=stdout, stderr=stderr)
+    if os.path.islink('node_modules'):
+        os.remove('node_modules')
+    elif os.path.isdir('node_modules'):
+        shutil.rmtree('node_modules')
+    os.symlink(cached_node_modules, 'node_modules')
 
-def do_npm_install(target_path, npm_args, stdout=None, stderr=None, copy_modules=False):
-    # type: (str, List[str], Optional[str], Optional[str], Optional[bool]) -> None
-    cmds = [
-        ["sudo", "rm", "-rf", target_path],
-        ['sudo', 'mkdir', '-p', target_path],
-        ["sudo", "chown", "{}:{}".format(os.getuid(), os.getgid()), target_path],
-        ['cp', 'package.json', target_path],
-    ]
-    if copy_modules:
-        print("Cached version not found! Copying node modules.")
-        cmds.append(["mv", "node_modules", target_path])
-    else:
-        print("Cached version not found! Installing node modules.")
-        cmds.append(['npm', 'install'] + npm_args + ['--prefix', target_path])
+def do_yarn_install(target_path, yarn_args, success_stamp, stdout=None, stderr=None):
+    # type: (str, List[str], str, Optional[IO[Any]], Optional[IO[Any]]) -> None
+    os.makedirs(target_path, exist_ok=True)
+    shutil.copy('package.json', target_path)
+    shutil.copy("yarn.lock", target_path)
+    shutil.copy(".yarnrc", target_path)
+    cached_node_modules = os.path.join(target_path, 'node_modules')
+    print("Cached version not found! Installing node modules.")
 
-    for cmd in cmds:
-        run(cmd, stdout=stdout, stderr=stderr)
+    # Copy the existing node_modules to speed up install
+    if os.path.exists("node_modules") and not os.path.exists(cached_node_modules):
+        shutil.copytree("node_modules/", cached_node_modules, symlinks=True)
+    if os.environ.get('CUSTOM_CA_CERTIFICATES'):
+        run([YARN_BIN, "config", "set", "cafile", os.environ['CUSTOM_CA_CERTIFICATES']],
+            stdout=stdout, stderr=stderr)
+    run([YARN_BIN, "install", "--non-interactive", "--frozen-lockfile"] + yarn_args,
+        cwd=target_path, stdout=stdout, stderr=stderr)
+    with open(success_stamp, 'w'):
+        pass

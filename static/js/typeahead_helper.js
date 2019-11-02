@@ -1,6 +1,15 @@
-var typeahead_helper = (function () {
+var render_typeahead_list_item = require('../templates/typeahead_list_item.hbs');
+var Dict = require('./dict').Dict;
 
-var exports = {};
+// Returns an array of private message recipients, removing empty elements.
+// For example, "a,,b, " => ["a", "b"]
+exports.get_cleaned_pm_recipients = function (query_string) {
+    var recipients = util.extract_pm_recipients(query_string);
+    recipients = _.filter(recipients, function (elem) {
+        return elem.match(/\S/);
+    });
+    return recipients;
+};
 
 // Loosely based on Bootstrap's default highlighter, but with escaping added.
 exports.highlight_with_escaping = function (query, item) {
@@ -50,7 +59,7 @@ exports.highlight_query_in_phrase = function (query, phrase) {
 
     var result = "";
     var parts = phrase.split(' ');
-    for (i = 0; i < parts.length; i++) {
+    for (i = 0; i < parts.length; i += 1) {
         if (i > 0) {
             result += " ";
         }
@@ -59,51 +68,134 @@ exports.highlight_query_in_phrase = function (query, phrase) {
     return result;
 };
 
-exports.render_person = function (person) {
-    if (person.special_item_text) {
-        return person.special_item_text;
-    }
-    return person.full_name + " <" + person.email + ">";
+exports.render_typeahead_item = function (args) {
+    args.has_image = args.img_src !== undefined;
+    args.has_secondary = args.secondary !== undefined;
+    return render_typeahead_list_item(args);
 };
 
-function prefix_sort(query, objs, get_item) {
-    // Based on Bootstrap typeahead's default sorter, but taking into
-    // account case sensitivity on "begins with"
-    var beginswithCaseSensitive = [];
-    var beginswithCaseInsensitive = [];
-    var noMatch = [];
+var rendered = { persons: new Dict(), streams: new Dict(), user_groups: new Dict() };
 
-    var obj = objs.shift();
-    while (obj) {
-        var item;
-        if (get_item) {
-            item = get_item(obj);
-        } else {
-            item = obj;
-        }
-        if (item.indexOf(query) === 0) {
-            beginswithCaseSensitive.push(obj);
-        } else if (item.toLowerCase().indexOf(query.toLowerCase()) === 0) {
-            beginswithCaseInsensitive.push(obj);
-        } else {
-            noMatch.push(obj);
-        }
-        obj = objs.shift();
+exports.render_person = function (person) {
+    if (person.special_item_text) {
+        return exports.render_typeahead_item({
+            primary: person.special_item_text,
+            is_person: true,
+        });
     }
-    return { matches: beginswithCaseSensitive.concat(beginswithCaseInsensitive),
-             rest:    noMatch };
 
+    var html = rendered.persons.get(person.user_id);
+    if (html === undefined) {
+        var avatar_url = people.small_avatar_url_for_person(person);
+
+        var typeahead_arguments = {
+            primary: person.full_name,
+            img_src: avatar_url,
+            is_person: true,
+        };
+        if (settings_org.show_email()) {
+            typeahead_arguments.secondary = person.email;
+        }
+        html = exports.render_typeahead_item(typeahead_arguments);
+        rendered.persons.set(person.user_id, html);
+    }
+    return html;
+};
+
+exports.clear_rendered_person = function (user_id) {
+    rendered.persons.del(user_id);
+};
+
+exports.render_user_group = function (user_group) {
+    var html = rendered.user_groups.get(user_group.id);
+    if (html === undefined) {
+        html = exports.render_typeahead_item({
+            primary: user_group.name,
+            secondary: user_group.description,
+            is_user_group: true,
+        });
+        rendered.user_groups.set(user_group.id, html);
+    }
+
+    return html;
+};
+
+exports.render_person_or_user_group = function (item) {
+    if (user_groups.is_user_group(item)) {
+        return exports.render_user_group(item);
+    }
+
+    return exports.render_person(item);
+};
+
+exports.clear_rendered_stream = function (stream_id) {
+    if (rendered.streams.has(stream_id)) {
+        rendered.streams.del(stream_id);
+    }
+};
+
+exports.render_stream = function (stream) {
+    var desc = stream.description;
+    var short_desc = desc.substring(0, 35);
+
+    if (desc !== short_desc) {
+        desc = short_desc + "...";
+    }
+
+    var html = rendered.streams.get(stream.stream_id);
+    if (html === undefined) {
+        html = exports.render_typeahead_item({
+            primary: stream.name,
+            secondary: desc,
+            is_unsubscribed: !stream.subscribed,
+        });
+        rendered.streams.set(stream.stream_id, html);
+    }
+
+    return html;
+};
+
+exports.render_emoji = function (item) {
+    var args = {
+        is_emoji: true,
+        primary: item.emoji_name.split("_").join(" "),
+    };
+    if (emoji.active_realm_emojis.hasOwnProperty(item.emoji_name)) {
+        args.img_src = item.emoji_url;
+    } else {
+        args.emoji_code = item.emoji_code;
+    }
+    return exports.render_typeahead_item(args);
+};
+
+// manipulate prefix_sort to select popular emojis first
+// This is kinda a hack and so probably not our long-term solution.
+function emoji_prefix_sort(query, objs, get_item) {
+    var prefix_sort = util.prefix_sort(query, objs, get_item);
+    var popular_emoji_matches = [];
+    var other_emoji_matches = [];
+    prefix_sort.matches.forEach(function (obj) {
+        if (emoji.frequently_used_emojis_list.indexOf(obj.emoji_code) !== -1) {
+            popular_emoji_matches.push(obj);
+        } else {
+            other_emoji_matches.push(obj);
+        }
+    });
+    return { matches: popular_emoji_matches.concat(other_emoji_matches), rest: prefix_sort.rest };
 }
 
 exports.sorter = function (query, objs, get_item) {
-   var results = prefix_sort(query, objs, get_item);
-   return results.matches.concat(results.rest);
+    var results = util.prefix_sort(query, objs, get_item);
+    return results.matches.concat(results.rest);
 };
 
 exports.compare_by_pms = function (user_a, user_b) {
-    if (user_a.pm_recipient_count > user_b.pm_recipient_count) {
+    var count_a = people.get_recipient_count(user_a);
+    var count_b = people.get_recipient_count(user_b);
+
+    if (count_a > count_b) {
         return -1;
-    } else if (user_a.pm_recipient_count < user_b.pm_recipient_count) {
+    } else if (count_a < count_b) {
         return 1;
     }
 
@@ -119,43 +211,232 @@ exports.compare_by_pms = function (user_a, user_b) {
         return -1;
     } else if (user_a === user_b) {
         return 0;
-    } else {
-        return 1;
     }
+    return 1;
 };
 
-exports.sort_by_pms = function (objs) {
-    objs.sort(exports.compare_by_pms);
+function compare_for_at_mentioning(person_a, person_b, tertiary_compare, current_stream) {
+    // give preference to "all", "everyone" or "stream"
+    if (person_a.email === "all" || person_a.email === "everyone" || person_a.email === "stream") {
+        return -1;
+    } else if (person_b.email === "all" || person_b.email === "everyone" || person_b.email === "stream") {
+        return 1;
+    }
+
+    // give preference to subscribed users first
+    if (current_stream !== undefined) {
+        var a_is_sub = stream_data.is_user_subscribed(current_stream, person_a.user_id);
+        var b_is_sub = stream_data.is_user_subscribed(current_stream, person_b.user_id);
+
+        if (a_is_sub && !b_is_sub) {
+            return -1;
+        } else if (!a_is_sub && b_is_sub) {
+            return 1;
+        }
+    }
+
+    // give preference to pm partners if both (are)/(are not) subscribers
+    var a_is_partner = pm_conversations.is_partner(person_a.user_id);
+    var b_is_partner = pm_conversations.is_partner(person_b.user_id);
+
+    if (a_is_partner && !b_is_partner) {
+        return -1;
+    } else if (!a_is_partner && b_is_partner) {
+        return 1;
+    }
+
+    return tertiary_compare(person_a, person_b);
+}
+
+exports.sort_for_at_mentioning = function (objs, current_stream_name, current_topic) {
+    // If sorting for recipientbox typeahead or compose state is private, then current_stream = ""
+    var current_stream = false;
+    if (current_stream_name) {
+        current_stream = stream_data.get_sub(current_stream_name);
+    }
+    if (!current_stream) {
+        objs.sort(function (person_a, person_b) {
+            return compare_for_at_mentioning(
+                person_a,
+                person_b,
+                exports.compare_by_pms
+            );
+        });
+    } else {
+        var stream_id = current_stream.stream_id;
+
+        objs.sort(function (person_a, person_b) {
+            return compare_for_at_mentioning(
+                person_a,
+                person_b,
+                function (user_a, user_b) {
+                    return recent_senders.compare_by_recency(
+                        user_a,
+                        user_b,
+                        stream_id,
+                        current_topic
+                    );
+                },
+                current_stream.name
+            );
+        });
+    }
+
     return objs;
 };
 
-function identity(item) {
-    return item;
-}
+exports.compare_by_popularity = function (lang_a, lang_b) {
+    var diff = pygments_data.langs[lang_b] - pygments_data.langs[lang_a];
+    if (diff !== 0) {
+        return diff;
+    }
+    return util.strcmp(lang_a, lang_b);
+};
 
-exports.sort_recipients = function (matches, query) {
-    var name_results =  prefix_sort(query, matches, function (x) { return x.full_name; });
-    var email_results = prefix_sort(query, name_results.rest, function (x) { return x.email; });
-    var matches_sorted_by_pms = exports.sort_by_pms(name_results.matches.concat(email_results.matches));
-    var rest_sorted_by_pms = exports.sort_by_pms(email_results.rest);
-    return matches_sorted_by_pms.concat(rest_sorted_by_pms);
+exports.sort_languages = function (matches, query) {
+    var results = util.prefix_sort(query, matches, function (x) { return x; });
+
+    // Languages that start with the query
+    results.matches = results.matches.sort(exports.compare_by_popularity);
+
+    // Push exact matches to top.
+    const match_index = results.matches.indexOf(query);
+    if (match_index > -1) {
+        results.matches.splice(match_index, 1);
+        results.matches.unshift(query);
+    }
+
+    // Languages that have the query somewhere in their name
+    results.rest = results.rest.sort(exports.compare_by_popularity);
+    return results.matches.concat(results.rest);
+};
+
+exports.sort_recipients = function (users, query, current_stream, current_topic, groups) {
+    var users_name_results =  util.prefix_sort(
+        query, users, function (x) { return x.full_name; });
+    var result = exports.sort_for_at_mentioning(
+        users_name_results.matches,
+        current_stream,
+        current_topic
+    );
+
+    var groups_results;
+    if (groups !== undefined) {
+        groups_results = util.prefix_sort(query, groups, function (x) { return x.name; });
+        result = result.concat(groups_results.matches);
+    }
+
+    var email_results = util.prefix_sort(query, users_name_results.rest,
+                                         function (x) { return x.email; });
+    result = result.concat(exports.sort_for_at_mentioning(
+        email_results.matches,
+        current_stream,
+        current_topic
+    ));
+    var rest_sorted = exports.sort_for_at_mentioning(
+        email_results.rest,
+        current_stream,
+        current_topic
+    );
+    if (groups !== undefined) {
+        rest_sorted = rest_sorted.concat(groups_results.rest);
+    }
+    return result.concat(rest_sorted);
+};
+
+function slash_command_comparator(slash_command_a, slash_command_b) {
+    if (slash_command_a.name < slash_command_b.name) {
+        return -1;
+    } else if (slash_command_a.name > slash_command_b.name) {
+        return 1;
+    }
+}
+exports.sort_slash_commands = function (matches, query) {
+    // We will likely want to in the future make this sort the
+    // just-`/` commands by something approximating usefulness.
+    var results = util.prefix_sort(query, matches, function (x) { return x.name; });
+    results.matches = results.matches.sort(slash_command_comparator);
+    results.rest = results.rest.sort(slash_command_comparator);
+    return results.matches.concat(results.rest);
 };
 
 exports.sort_emojis = function (matches, query) {
     // TODO: sort by category in v2
-    var results = prefix_sort(query, matches, function (x) { return x.emoji_name; });
+    var results = emoji_prefix_sort(query, matches, function (x) { return x.emoji_name; });
     return results.matches.concat(results.rest);
 };
 
-exports.sort_recipientbox_typeahead = function (matches) {
-    // input_text may be one or more pm recipients
-    var cleaned = composebox_typeahead.get_cleaned_pm_recipients(this.query);
-    var query = cleaned[cleaned.length - 1];
-    return exports.sort_recipients(matches, query);};
-
-return exports;
-
-}());
-if (typeof module !== 'undefined') {
-    module.exports = typeahead_helper;
+// Gives stream a score from 0 to 3 based on its activity
+function activity_score(sub) {
+    var stream_score = 0;
+    if (!sub.subscribed) {
+        stream_score = -1;
+    } else {
+        if (sub.pin_to_top) {
+            stream_score += 2;
+        }
+        // Note: A pinned stream may accumulate a 3rd point if it is active
+        if (stream_data.is_active(sub)) {
+            stream_score += 1;
+        }
+    }
+    return stream_score;
 }
+
+// Sort streams by ranking them by activity. If activity is equal,
+// as defined bv activity_score, decide based on subscriber count.
+exports.compare_by_activity = function (stream_a, stream_b) {
+    var diff = activity_score(stream_b) - activity_score(stream_a);
+    if (diff !== 0) {
+        return diff;
+    }
+    diff = stream_b.subscribers.num_items() - stream_a.subscribers.num_items();
+    if (diff !== 0) {
+        return diff;
+    }
+    return util.strcmp(stream_a.name, stream_b.name);
+};
+
+exports.sort_streams = function (matches, query) {
+    var name_results = util.prefix_sort(query, matches, function (x) { return x.name; });
+    var desc_results
+        = util.prefix_sort(query, name_results.rest, function (x) { return x.description; });
+
+    // Streams that start with the query.
+    name_results.matches = name_results.matches.sort(exports.compare_by_activity);
+    // Streams with descriptions that start with the query.
+    desc_results.matches = desc_results.matches.sort(exports.compare_by_activity);
+    // Streams with names and descriptions that don't start with the query.
+    desc_results.rest = desc_results.rest.sort(exports.compare_by_activity);
+
+    return name_results.matches.concat(desc_results.matches.concat(desc_results.rest));
+};
+
+exports.sort_recipientbox_typeahead = function (query, matches, current_stream) {
+    // input_text may be one or more pm recipients
+    var cleaned = exports.get_cleaned_pm_recipients(query);
+    query = cleaned[cleaned.length - 1];
+    return exports.sort_recipients(matches, query, current_stream);
+};
+
+exports.sort_people_and_user_groups = function (query, matches) {
+    var users = [];
+    var groups = [];
+    _.each(matches, function (match) {
+        if (user_groups.is_user_group(match)) {
+            groups.push(match);
+        } else {
+            users.push(match);
+        }
+    });
+
+    var recipients = exports.sort_recipients(
+        users,
+        query,
+        compose_state.stream_name(),
+        compose_state.topic(),
+        groups);
+    return recipients;
+};
+
+window.typeahead_helper = exports;

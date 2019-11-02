@@ -1,7 +1,5 @@
-from __future__ import absolute_import
-from __future__ import print_function
-
 import unittest
+import os
 
 import tools.lib.template_parser
 
@@ -9,13 +7,16 @@ from tools.lib.html_branches import (
     get_tag_info,
     html_branches,
     html_tag_tree,
+    build_id_dict,
+    split_for_id_and_class,
 )
 
+ZULIP_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TEST_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_template_data")
 
 class TestHtmlBranches(unittest.TestCase):
 
-    def test_get_tag_info(self):
-        # type: () -> None
+    def test_get_tag_info(self) -> None:
         html = """
             <p id="test" class="test1 test2">foo</p>
         """
@@ -28,8 +29,7 @@ class TestHtmlBranches(unittest.TestCase):
         self.assertEqual(start_tag_info.text(), 'p.test1.test2#test')
         self.assertEqual(end_tag_info.text(), 'p')
 
-    def test_html_tag_tree(self):
-        # type: () -> None
+    def test_html_tag_tree(self) -> None:
         html = """
             <!-- test -->
             <!DOCTYPE html>
@@ -71,8 +71,7 @@ class TestHtmlBranches(unittest.TestCase):
         self.assertEqual(tree.children[0].children[1].children[1].token.kind, 'html_start')
         self.assertEqual(tree.children[0].children[1].children[1].token.tag, 'p')
 
-    def test_html_branches(self):
-        # type: () -> None
+    def test_html_branches(self) -> None:
         html = """
             <!-- test -->
             <!DOCTYPE html>
@@ -100,3 +99,35 @@ class TestHtmlBranches(unittest.TestCase):
         self.assertEqual(branches[0].staircase_text(), '\n    html\n        head\n            title\n')
         self.assertEqual(branches[1].staircase_text(), '\n    html\n        body\n            p\n                br\n')
         self.assertEqual(branches[2].staircase_text(), '\n    html\n        body\n            p\n')
+
+    def test_build_id_dict(self) -> None:
+        templates = ["test_template1.html", "test_template2.html"]
+        templates = [os.path.join(TEST_TEMPLATES_DIR, fn) for fn in templates]
+
+        template_id_dict = build_id_dict(templates)
+
+        self.assertEqual(set(template_id_dict.keys()), {'below_navbar', 'hello_{{ message }}', 'intro'})
+        self.assertEqual(template_id_dict['hello_{{ message }}'], [
+                         'Line 12:%s/tools/tests/test_template_data/test_template1.html' % (ZULIP_PATH,),
+                         'Line 12:%s/tools/tests/test_template_data/test_template2.html' % (ZULIP_PATH,)])
+        self.assertEqual(template_id_dict['intro'], [
+                         'Line 10:%s/tools/tests/test_template_data/test_template1.html' % (ZULIP_PATH,),
+                         'Line 11:%s/tools/tests/test_template_data/test_template1.html' % (ZULIP_PATH,),
+                         'Line 11:%s/tools/tests/test_template_data/test_template2.html' % (ZULIP_PATH,)])
+        self.assertEqual(template_id_dict['below_navbar'], [
+                         'Line 10:%s/tools/tests/test_template_data/test_template2.html' % (ZULIP_PATH,)])
+
+    def test_split_for_id_and_class(self) -> None:
+        id1 = "{{ red|blue }}"
+        id2 = "search_box_{{ page }}"
+
+        class1 = "chat_box message"
+        class2 = "stream_{{ topic }}"
+        class3 = "foo {{ a|b|c }} bar"
+
+        self.assertEqual(split_for_id_and_class(id1), ['{{ red|blue }}'])
+        self.assertEqual(split_for_id_and_class(id2), ['search_box_{{ page }}'])
+
+        self.assertEqual(split_for_id_and_class(class1), ['chat_box', 'message'])
+        self.assertEqual(split_for_id_and_class(class2), ['stream_{{ topic }}'])
+        self.assertEqual(split_for_id_and_class(class3), ['foo', '{{ a|b|c }}', 'bar'])

@@ -1,6 +1,6 @@
 /**
  * marked - a markdown parser
- * Copyright (c) 2011-2013, Christopher Jeffrey. (MIT Licensed)
+ * Copyright (c) 2011-2014, Christopher Jeffrey. (MIT Licensed)
  * https://github.com/chjj/marked
  */
 
@@ -15,19 +15,18 @@ var block = {
   code: /^( {4}[^\n]+\n*)+/,
   fences: noop,
   hr: /^( *[-*_]){3,} *(?:\n+|$)/,
-  heading: /^ *(#{1,6}) *([^\n]+?) *#* *(?:\n+|$)/,
+  heading: /^ {0,3}(#{1,6}) +([^\n]*?)(?: +#+)? *(?:\n+|$)/,
   nptable: noop,
-  lheading: /^([^\n]+)\n *(=|-){2,} *(?:\n+|$)/,
-  blockquote: /^( *>[^\n]+(\n[^\n]+)*\n*)+/,
-  list: /^( *)(bull) [\s\S]+?(?:hr|\n{2,}(?! )(?!\1bull )\n*|\s*$)/,
-  html: /^ *(?:comment|closed|closing) *(?:\n{2,}|\s*$)/,
+  blockquote: /^(?!( *>\s*($|\n))*($|\n))( *>[^\n]*(\n(?!def)[^\n]+)*\n*)+/,
+  list: /^( *)(bull) [\s\S]+?(?:hr|def|\n{2,}(?! )(?!\1bull )\n*|\s*$)/,
+  html: /^ *(?:comment *(?:\n|\s*$)|closed *(?:\n{2,}|\s*$)|closing *(?:\n{2,}|\s*$))/,
   def: /^ *\[([^\]]+)\]: *<?([^\s>]+)>?(?: +["(]([^\n]+)[")])? *(?:\n+|$)/,
   table: noop,
-  paragraph: /^((?:[^\n]+\n?(?!hr|heading|lheading|blockquote|tag|def))+)\n*/,
+  paragraph: /^((?:[^\n]+\n?(?!hr|heading|blockquote|tag|def))+)\n*/,
   text: /^[^\n]+/
 };
 
-block.bullet = /(?:[*+-]|\d+\.)/;
+block.bullet = /(?:[*+-]|\d{1,9}\.)/;
 block.item = /^( *)(bull) [^\n]*(?:\n(?!\1bull )[^\n]*)*/;
 block.item = replace(block.item, 'gm')
   (/bull/g, block.bullet)
@@ -35,7 +34,12 @@ block.item = replace(block.item, 'gm')
 
 block.list = replace(block.list)
   (/bull/g, block.bullet)
-  ('hr', /\n+(?=(?: *[-*_]){3,} *(?:\n+|$))/)
+  ('hr', '\\n+(?=\\1?(?:[-*_] *){3,}(?:\\n+|$))')
+  ('def', '\\n+(?=' + block.def.source + ')')
+  ();
+
+block.blockquote = replace(block.blockquote)
+  ('def', block.def)
   ();
 
 block._tag = '(?!(?:'
@@ -52,8 +56,7 @@ block.html = replace(block.html)
 
 block.paragraph = replace(block.paragraph)
   ('hr', block.hr)
-  ('heading', block.heading)
-  ('lheading', block.lheading)
+  ('heading', ' {0,3}#{1,6} +')
   ('blockquote', block.blockquote)
   ('tag', '<' + block._tag)
   ('def', block.def)
@@ -70,8 +73,8 @@ block.normal = merge({}, block);
  */
 
 block.gfm = merge({}, block.normal, {
-  fences: /^ *(`{3,}|~{3,}) *(\S+)? *\n([\s\S]+?)\s*\1 *(?:\n+|$)/,
-  paragraph: /^/
+  fences: /^ *(`{3,}|~{3,})[ \.]*(\S+)? *\n([\s\S]*?)\s*\1 *(?:\n+|$)/,
+  paragraph: /^/,
 });
 
 block.gfm.paragraph = replace(block.paragraph)
@@ -97,13 +100,13 @@ function Lexer(options) {
   this.tokens = [];
   this.tokens.links = {};
   this.options = options || marked.defaults;
-  this.rules = Lexer.rules.normal;
+  this.rules = block.normal;
 
   if (this.options.gfm) {
     if (this.options.tables) {
-      this.rules = Lexer.rules.tables;
+      this.rules = block.tables;
     } else {
-      this.rules = Lexer.rules.gfm;
+      this.rules = block.gfm;
     }
   }
 }
@@ -155,7 +158,7 @@ function stashHtml(html, safe) {
  * Lexing
  */
 
-Lexer.prototype.token = function(src, top) {
+Lexer.prototype.token = function(src, top, bq) {
   var src = src.replace(/^ +$/gm, '')
     , next
     , loose
@@ -163,9 +166,12 @@ Lexer.prototype.token = function(src, top) {
     , bull
     , b
     , item
+    , listStart
+    , listItems
     , space
     , i
-    , l;
+    , l
+    , isordered;
 
   while (src) {
     // newline
@@ -197,7 +203,7 @@ Lexer.prototype.token = function(src, top) {
       this.tokens.push({
         type: 'code',
         lang: cap[2],
-        text: cap[3]
+        text: cap[3] || ''
       });
       continue;
     }
@@ -245,17 +251,6 @@ Lexer.prototype.token = function(src, top) {
       continue;
     }
 
-    // lheading
-    if (cap = this.rules.lheading.exec(src)) {
-      src = src.substring(cap[0].length);
-      this.tokens.push({
-        type: 'heading',
-        depth: cap[2] === '=' ? 1 : 2,
-        text: cap[1]
-      });
-      continue;
-    }
-
     // hr
     if (cap = this.rules.hr.exec(src)) {
       src = src.substring(cap[0].length);
@@ -278,7 +273,7 @@ Lexer.prototype.token = function(src, top) {
       // Pass `top` to keep the current
       // "toplevel" state. This is exactly
       // how markdown.pl works.
-      this.token(cap, top);
+      this.token(cap, top, true);
 
       this.tokens.push({
         type: 'blockquote_end'
@@ -291,15 +286,21 @@ Lexer.prototype.token = function(src, top) {
     if (cap = this.rules.list.exec(src)) {
       src = src.substring(cap[0].length);
       bull = cap[2];
+      isordered = bull.length > 1;
 
-      this.tokens.push({
+      listStart = {
         type: 'list_start',
-        ordered: bull.length > 1
-      });
+        ordered: isordered,
+        start: isordered ? +bull : '',
+        loose: false
+      };
+
+      this.tokens.push(listStart);
 
       // Get each top-level item.
       cap = cap[0].match(this.rules.item);
 
+      listItems = [];
       next = false;
       l = cap.length;
       i = 0;
@@ -310,7 +311,7 @@ Lexer.prototype.token = function(src, top) {
         // Remove the list item's bullet
         // so it is seen as the next token.
         space = item.length;
-        item = item.replace(/^ *([*+-]|\d+\.) +/, '');
+        item = item.replace(/^ *([*+-]|\d+\.) */, '');
 
         // Outdent whatever the
         // list item contains. Hacky.
@@ -323,9 +324,10 @@ Lexer.prototype.token = function(src, top) {
 
         // Determine whether the next list item belongs here.
         // Backpedal if it does not belong in this list.
-        if (this.options.smartLists && i !== l - 1) {
+        if (i !== l - 1) {
           b = block.bullet.exec(cap[i + 1])[0];
-          if (bull !== b && !(bull.length > 1 && b.length > 1)) {
+          if (bull.length > 1 ? b.length === 1
+            : (b.length > 1 || (this.options.smartLists && b !== bull))) {
             src = cap.slice(i + 1).join('\n') + src;
             i = l - 1;
           }
@@ -340,11 +342,17 @@ Lexer.prototype.token = function(src, top) {
           if (!loose) loose = next;
         }
 
-        this.tokens.push({
-          type: loose
-            ? 'loose_item_start'
-            : 'list_item_start'
-        });
+        if (loose) {
+          listStart.loose = true;
+        }
+
+        t = {
+          type: 'list_item_start',
+          loose: loose
+        };
+
+        listItems.push(t);
+        this.tokens.push(t);
 
         // Recurse.
         this.token(item, false);
@@ -352,6 +360,14 @@ Lexer.prototype.token = function(src, top) {
         this.tokens.push({
           type: 'list_item_end'
         });
+      }
+
+      if (listStart.loose) {
+        l = listItems.length;
+        i = 0;
+        for (; i < l; i++) {
+          listItems[i].loose = true;
+        }
       }
 
       this.tokens.push({
@@ -368,21 +384,15 @@ Lexer.prototype.token = function(src, top) {
         type: this.options.sanitize
           ? 'paragraph'
           : 'html',
-        pre: cap[1] === 'pre' || cap[1] === 'script' || cap[1] === 'style',
+        pre: !this.options.sanitizer
+          && (cap[1] === 'pre' || cap[1] === 'script' || cap[1] === 'style'),
         text: cap[0]
       });
       continue;
     }
 
     // def
-    if (top && (cap = this.rules.def.exec(src))) {
-      src = src.substring(cap[0].length);
-      this.tokens.links[cap[1].toLowerCase()] = {
-        href: cap[2],
-        title: cap[3]
-      };
-      continue;
-    }
+    // We disable definition style links in Zulip.
 
     // table (gfm)
     if (top && (cap = this.rules.table.exec(src))) {
@@ -463,15 +473,20 @@ var inline = {
   reflink: /^!?\[(inside)\]\s*\[([^\]]*)\]/,
   nolink: /^!?\[((?:\[[^\]]*\]|[^\[\]])*)\]/,
   strong: /^__([\s\S]+?)__(?!_)|^\*\*([\s\S]+?)\*\*(?!\*)/,
-  em: /^\b_((?:__|[\s\S])+?)_\b|^\*((?:\*\*|[\s\S])+?)\*(?!\*)/,
-  code: /^(`+)\s*([\s\S]*?[^`])\s*\1(?!`)/,
+  em: /^\b_((?:[^_]|__)+?)_\b|^\*((?:\*\*|[\s\S])+?)\*(?!\*)/,
+  code: /^(`+)(\s*[\s\S]*?[^`]\s*)\1(?!`)/,
   br: /^ {2,}\n(?!\s*$)/,
   del: noop,
   emoji: noop,
   unicodeemoji: noop,
   usermention: noop,
+  groupmention: noop,
+  stream: noop,
+  avatar: noop,
+  tex: noop,
+  gravatar: noop,
   realm_filters: [],
-  text: /^[\s\S]+?(?=[\\<!\[_*`]| {2,}\n|$)/
+  text: /^[\s\S]+?(?=[\\<!\[_*`$]| {2,}\n|$)/
 };
 
 inline._inside = /(?:\[[^\]]*\]|[^\[\]]|\](?=[^\[]*\]))*/;
@@ -526,12 +541,25 @@ inline.breaks = merge({}, inline.gfm, {
 
 inline.zulip = merge({}, inline.breaks, {
   emoji: /^:([A-Za-z0-9_\-\+]+?):/,
-  unicodeemoji: /^(\ud83c[\udf00-\udfff]|\ud83d[\udc00-\ude4f]|\ud83d[\ude80-\udeff])/,
-  usermention: /^(@\*\*([^\*]+)?\*\*)/m,
+  unicodeemoji: RegExp('^(\ud83c[\udd00-\udfff]|\ud83d[\udc00-\ude4f]|' +
+                       '\ud83d[\ude80-\udeff]|\ud83e[\udd00-\uddff]|' +
+                       '[\u2000-\u206F]|[\u2300-\u27BF]|[\u2B00-\u2BFF]|' +
+                       '[\u3000-\u303F]|[\u3200-\u32FF])'),
+  usermention: /^(@(_?)(?:\*\*([^\*]+)\*\*))/, // Match potentially multi-word string between @** **
+  groupmention: /^@\*([^\*]+)\*/, // Match multi-word string between @* *
+  stream_topic: /^#\*\*([^\*>]+)>([^\*]+)\*\*/,
+  stream: /^#\*\*([^\*]+)\*\*/,
+  avatar: /^!avatar\(([^)]+)\)/,
+  gravatar: /^!gravatar\(([^)]+)\)/,
+  tex: /^(\$\$([^\n_$](\\\$|[^\n$])*)\$\$(?!\$))\B/,
   realm_filters: [],
   text: replace(inline.breaks.text)
-    ('|', '|(\ud83c[\udf00-\udfff]|\ud83d[\udc00-\ude4f]|\ud83d[\ude80-\udeff])|')
-    (']|', '@:]|')
+    ('|', '|(\ud83c[\udd00-\udfff]|\ud83d[\udc00-\ude4f]|' +
+          '\ud83d[\ude80-\udeff]|\ud83e[\udd00-\uddff]|' +
+          '[\u2000-\u206F]|[\u2300-\u27BF]|[\u2B00-\u2BFF]|' +
+          '[\u3000-\u303F]|[\u3200-\u32FF])|')
+    (']|', '#@:]|')
+    ('^[', '^^\\${3,}|^^[')
     ()
 });
 
@@ -654,7 +682,7 @@ InlineLexer.prototype.output = function(src) {
     }
 
     // url (gfm)
-    if (cap = this.rules.url.exec(src)) {
+    if (!this.inLink && (cap = this.rules.url.exec(src))) {
       src = src.substring(cap[0].length);
       text = escape(cap[1]);
       href = text;
@@ -664,20 +692,29 @@ InlineLexer.prototype.output = function(src) {
 
     // tag
     if (cap = this.rules.tag.exec(src)) {
+      if (!this.inLink && /^<a /i.test(cap[0])) {
+        this.inLink = true;
+      } else if (this.inLink && /^<\/a>/i.test(cap[0])) {
+        this.inLink = false;
+      }
       src = src.substring(cap[0].length);
       out += this.options.sanitize
-        ? escape(cap[0])
-        : cap[0];
+        ? this.options.sanitizer
+          ? this.options.sanitizer(cap[0])
+          : escape(cap[0])
+        : cap[0]
       continue;
     }
 
     // link
     if (cap = this.rules.link.exec(src)) {
       src = src.substring(cap[0].length);
+      this.inLink = true;
       out += this.outputLink(cap, {
         href: cap[2],
         title: cap[3]
       });
+      this.inLink = false;
       continue;
     }
 
@@ -692,14 +729,37 @@ InlineLexer.prototype.output = function(src) {
         src = cap[0].substring(1) + src;
         continue;
       }
+      this.inLink = true;
       out += this.outputLink(cap, link);
+      this.inLink = false;
       continue;
     }
 
     // usermention (zulip)
     if (cap = this.rules.usermention.exec(src)) {
       src = src.substring(cap[0].length);
-      out += this.usermention(cap[2], cap[1]);
+      out += this.usermention(cap[3] || cap[4], cap[1], cap[2]);
+      continue;
+    }
+
+    // groupmention (zulip)
+    if (cap = this.rules.groupmention.exec(src)) {
+      src = src.substring(cap[0].length);
+      out += this.groupmention(cap[1], cap[0]);
+      continue;
+    }
+
+    // stream_topic (zulip)
+    if (cap = this.rules.stream_topic.exec(src)) {
+      src = src.substring(cap[0].length);
+      out += this.stream_topic(cap[1], cap[2], cap[0]);
+      continue;
+    }
+
+    // stream (zulip)
+    if (cap = this.rules.stream.exec(src)) {
+      src = src.substring(cap[0].length);
+      out += this.stream(cap[1], cap[0]);
       continue;
     }
 
@@ -713,7 +773,7 @@ InlineLexer.prototype.output = function(src) {
     // em
     if (cap = this.rules.em.exec(src)) {
       src = src.substring(cap[0].length);
-      out += this.renderer.em(this.output(cap[2] || cap[1]));
+      out += this.renderer.em(this.output(cap[1] + cap[2]));
       continue;
     }
 
@@ -752,10 +812,35 @@ InlineLexer.prototype.output = function(src) {
       continue;
     }
 
+    // user avatar
+    if (cap = this.rules.avatar.exec(src)) {
+      src = src.substring(cap[0].length);
+      out += this.userAvatar(cap[1]);
+      continue;
+    }
+
+    // user gravatar
+    if (cap = this.rules.gravatar.exec(src)) {
+      src = src.substring(cap[0].length);
+      out += this.userGravatar(cap[1]);
+      continue;
+    }
+
+    // tex
+    if (cap = this.rules.tex.exec(src)) {
+      src = src.substring(cap[0].length);
+      out += this.tex(cap[2], cap[0]);
+      continue;
+    }
+
+    // WARNING: Do not place any parsing logic below this comment.
+    // Any parsing logic place after the `text` block below will most
+    // likely be silently never executed.
+
     // text
     if (cap = this.rules.text.exec(src)) {
       src = src.substring(cap[0].length);
-      out += escape(this.smartypants(cap[0]));
+      out += this.renderer.text(escape(this.smartypants(cap[0])));
       continue;
     }
 
@@ -776,14 +861,12 @@ InlineLexer.prototype.outputLink = function(cap, link) {
   var href = escape(link.href)
     , title = link.title ? escape(link.title) : null;
 
-  if (cap[0].charAt(0) !== '!') {
-    return this.renderer.link(href, title, this.output(cap[1]));
-  } else {
-    return this.renderer.image(href, title, escape(cap[1]));
-  }
+  return cap[0].charAt(0) !== '!'
+    ? this.renderer.link(href, title, this.output(cap[1]))
+    : this.renderer.image(href, title, escape(cap[1]));
 };
-
 InlineLexer.prototype.emoji = function (name) {
+  name = escape(name)
   if (typeof this.options.emojiHandler !== 'function')
     return ':' + name + ':';
 
@@ -791,9 +874,30 @@ InlineLexer.prototype.emoji = function (name) {
 };
 
 InlineLexer.prototype.unicodeEmoji = function (name) {
+  name = escape(name)
   if (typeof this.options.unicodeEmojiHandler !== 'function')
     return name;
   return this.options.unicodeEmojiHandler(name);
+};
+
+InlineLexer.prototype.tex = function (tex, fullmatch) {
+  if (typeof this.options.texHandler !== 'function')
+    return fullmatch;
+  return this.options.texHandler(tex, fullmatch);
+};
+
+InlineLexer.prototype.userAvatar = function (email) {
+  email = escape(email);
+  if (typeof this.options.avatarHandler !== 'function')
+    return '!avatar(' + email + ')';
+  return this.options.avatarHandler(email);
+};
+
+InlineLexer.prototype.userGravatar = function (email) {
+  email = escape(email);
+  if (typeof this.options.avatarHandler !== 'function')
+    return '!gravatar(' + email + ')';
+  return this.options.avatarHandler(email);
 };
 
 InlineLexer.prototype.realm_filter = function (filter, matches, orig) {
@@ -803,17 +907,56 @@ InlineLexer.prototype.realm_filter = function (filter, matches, orig) {
   return this.options.realmFilterHandler(filter, matches);
 };
 
-InlineLexer.prototype.usermention = function (username, orig) {
+InlineLexer.prototype.usermention = function (username, orig, silent) {
+  orig = escape(orig);
   if (typeof this.options.userMentionHandler !== 'function')
   {
     return orig;
   }
-
-  var handled = this.options.userMentionHandler(username);
+  var handled = this.options.userMentionHandler(username, silent === '_');
   if (handled !== undefined) {
     return handled;
   }
 
+  return orig;
+};
+
+InlineLexer.prototype.groupmention = function (groupname, orig) {
+  orig = escape(orig);
+  if (typeof this.options.groupMentionHandler !== 'function')
+  {
+    return orig;
+  }
+
+  var handled = this.options.groupMentionHandler(groupname);
+  if (handled !== undefined) {
+    return handled;
+  }
+
+  return orig;
+};
+
+InlineLexer.prototype.stream = function (streamName, orig) {
+  orig = escape(orig);
+  if (typeof this.options.streamHandler !== 'function')
+    return orig;
+
+  var handled = this.options.streamHandler(streamName);
+  if (handled !== undefined) {
+    return handled;
+  }
+  return orig;
+};
+
+InlineLexer.prototype.stream_topic = function (streamName, topic, orig) {
+  orig = escape(orig);
+  if (typeof this.options.streamHandler !== 'function')
+    return orig;
+
+  var handled = this.options.streamTopicHandler(streamName, topic);
+  if (handled !== undefined) {
+    return handled;
+  }
   return orig;
 };
 
@@ -825,7 +968,9 @@ InlineLexer.prototype.smartypants = function(text) {
   if (!this.options.smartypants) return text;
   return text
     // em-dashes
-    .replace(/--/g, '\u2014')
+    .replace(/---/g, '\u2014')
+    // en-dashes
+    .replace(/--/g, '\u2013')
     // opening singles
     .replace(/(^|[-\u2014/(\[{"\s])'/g, '$1\u2018')
     // closing singles & apostrophes
@@ -843,6 +988,7 @@ InlineLexer.prototype.smartypants = function(text) {
  */
 
 InlineLexer.prototype.mangle = function(text) {
+  if (!this.options.mangle) return text;
   var out = ''
     , l = text.length
     , i = 0
@@ -891,6 +1037,7 @@ Renderer.prototype.code = function(code, lang, escaped) {
 };
 
 Renderer.prototype.blockquote = function(quote) {
+  quote = this.options.silencedMentionHandler(quote);
   return '<blockquote>\n' + quote + '</blockquote>\n';
 };
 
@@ -898,26 +1045,19 @@ Renderer.prototype.html = function(html) {
   return html;
 };
 
-Renderer.prototype.heading = function(text, level, raw) {
-  return '<h'
-    + level
-    + ' id="'
-    + this.options.headerPrefix
-    + raw.toLowerCase().replace(/[^\w]+/g, '-')
-    + '">'
-    + text
-    + '</h'
-    + level
-    + '>\n';
+Renderer.prototype.heading = function(text, level, raw, slugger) {
+  // ignore IDs
+  return '<h' + level + '>' + text + '</h' + level + '>\n';
 };
 
 Renderer.prototype.hr = function() {
-  return '<hr>\n';
+  return this.options.xhtml ? '<hr/>\n' : '<hr>\n';
 };
 
-Renderer.prototype.list = function(body, ordered) {
-  var type = ordered ? 'ol' : 'ul';
-  return '<' + type + '>\n' + body + '</' + type + '>\n';
+Renderer.prototype.list = function(body, ordered, start) {
+  var type = ordered ? 'ol' : 'ul',
+      startatt = (ordered && start !== 1) ? (' start="' + start + '"') : '';
+  return '<' + type + startatt + '>\n' + body + '</' + type + '>\n';
 };
 
 Renderer.prototype.listitem = function(text) {
@@ -957,6 +1097,7 @@ Renderer.prototype.strong = function(text) {
 };
 
 Renderer.prototype.em = function(text) {
+  text = escape(text);
   return '<em>' + text + '</em>';
 };
 
@@ -965,7 +1106,7 @@ Renderer.prototype.codespan = function(text) {
 };
 
 Renderer.prototype.br = function() {
-  return '<br>';
+  return this.options.xhtml ? '<br/>' : '<br>';
 };
 
 Renderer.prototype.del = function(text) {
@@ -981,7 +1122,7 @@ Renderer.prototype.link = function(href, title, text) {
     } catch (e) {
       return '';
     }
-    if (prot.indexOf('javascript:') === 0) {
+    if (prot.indexOf('javascript:') === 0 || prot.indexOf('vbscript:') === 0) {
       return '';
     }
   }
@@ -998,8 +1139,12 @@ Renderer.prototype.image = function(href, title, text) {
   if (title) {
     out += ' title="' + title + '"';
   }
-  out += '>';
+  out += this.options.xhtml ? '/>' : '>';
   return out;
+};
+
+Renderer.prototype.text = function(text) {
+  return text;
 };
 
 /**
@@ -1100,14 +1245,15 @@ Parser.prototype.tok = function() {
     case 'space': {
       return '';
     }
-    case 'hr': {
-      return this.renderer.hr();
-    }
     case 'heading': {
       return this.renderer.heading(
         this.inline.output(this.token.text),
         this.token.depth,
-        this.token.text);
+        unescape(this.token.text),
+        this.slugger);
+    }
+    case 'hr': {
+      return this.renderer.hr();
     }
     case 'code': {
       return this.renderer.code(this.token.text,
@@ -1160,30 +1306,23 @@ Parser.prototype.tok = function() {
     }
     case 'list_start': {
       var body = ''
-        , ordered = this.token.ordered;
+        , ordered = this.token.ordered
+        , start = this.token.start;
 
       while (this.next().type !== 'list_end') {
         body += this.tok();
       }
 
-      return this.renderer.list(body, ordered);
+      return this.renderer.list(body, ordered, start);
     }
     case 'list_item_start': {
-      var body = '';
+      var body = ''
+        , loose = this.token.loose;
 
       while (this.next().type !== 'list_item_end') {
-        body += this.token.type === 'text'
+        body += !loose && this.token.type === 'text'
           ? this.parseText()
           : this.tok();
-      }
-
-      return this.renderer.listitem(body);
-    }
-    case 'loose_item_start': {
-      var body = '';
-
-      while (this.next().type !== 'list_item_end') {
-        body += this.tok();
       }
 
       return this.renderer.listitem(body);
@@ -1217,7 +1356,8 @@ function escape(html, encode) {
 }
 
 function unescape(html) {
-  return html.replace(/&([#\w]+);/g, function(_, n) {
+  // explicitly match decimal, hex, and named HTML entities
+  return html.replace(/&(#(?:\d+)|(?:#x[0-9A-Fa-f]+)|(?:\w+));?/g, function(_, n) {
     n = n.toLowerCase();
     if (n === 'colon') return ':';
     if (n.charAt(0) === '#') {
@@ -1294,8 +1434,13 @@ function marked(src, opt, callback) {
 
     pending = tokens.length;
 
-    var done = function() {
-      var out, err;
+    var done = function(err) {
+      if (err) {
+        opt.highlight = highlight;
+        return callback(err);
+      }
+
+      var out;
 
       try {
         out = Parser.parse(tokens, opt);
@@ -1324,6 +1469,7 @@ function marked(src, opt, callback) {
           return --pending || done();
         }
         return highlight(token.text, token.lang, function(err, code) {
+          if (err) return done(err);
           if (code == null || code === token.text) {
             return --pending || done();
           }
@@ -1347,7 +1493,7 @@ function marked(src, opt, callback) {
   } catch (e) {
     e.message += '\nPlease report this to https://github.com/chjj/marked.';
     if ((opt || marked.defaults).silent) {
-      return '<p>An error occured:</p><pre>'
+      return '<p>An error occurred:</p><pre>'
         + escape(e.message + '', true)
         + '</pre>';
     }
@@ -1369,10 +1515,14 @@ marked.defaults = {
   gfm: true,
   emoji: false,
   unicodeemoji: false,
+  avatar: false,
+  gravatar: false,
   tables: true,
   breaks: false,
   pedantic: false,
   sanitize: false,
+  sanitizer: null,
+  mangle: true,
   smartLists: false,
   silent: false,
   highlight: null,
@@ -1380,7 +1530,8 @@ marked.defaults = {
   smartypants: false,
   headerPrefix: '',
   renderer: new Renderer,
-  preprocessors: []
+  preprocessors: [],
+  xhtml: false
 };
 
 /**
@@ -1402,7 +1553,7 @@ marked.parse = marked;
 
 marked.stashHtml = stashHtml;
 
-if (typeof exports === 'object') {
+if (typeof module !== 'undefined' && typeof exports === 'object') {
   module.exports = marked;
 } else if (typeof define === 'function' && define.amd) {
   define(function() { return marked; });

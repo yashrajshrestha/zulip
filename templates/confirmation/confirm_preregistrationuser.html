@@ -1,4 +1,5 @@
 {% extends "zerver/base.html" %}
+{% set entrypoint = "confirm-preregistrationuser" %}
 
 {% block content %}
 
@@ -15,9 +16,4 @@ post to another view which executes in our code to produce the desired form.
     <input type="hidden" value="{% if full_name %}{{ full_name }}{% endif %}" name="full_name"/>
 </form>
 
-<script type="text/javascript">
-    $(function () {
-        $("#register").submit();
-    });
-</script>
 {% endblock %}

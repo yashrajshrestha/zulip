@@ -1,26 +1,18 @@
-from __future__ import absolute_import
-from __future__ import print_function
-
-from typing import Any
-
-from argparse import ArgumentParser
-from django.core.management.base import BaseCommand, CommandError
-from django.core.exceptions import ValidationError
-
 import glob
 import logging
 import os
 import shutil
-import tempfile
-import ujson
+from argparse import ArgumentParser
+from typing import Any
+
+from django.core.management.base import BaseCommand
 
 from zerver.lib.export import export_usermessages_batch
 
 class Command(BaseCommand):
     help = """UserMessage fetching helper for export.py"""
 
-    def add_arguments(self, parser):
-        # type: (ArgumentParser) -> None
+    def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument('--path',
                             dest='path',
                             action="store",
@@ -31,9 +23,14 @@ class Command(BaseCommand):
                             action="store",
                             default=None,
                             help='Thread ID')
+        parser.add_argument('--consent-message-id',
+                            dest="consent_message_id",
+                            action="store",
+                            default=None,
+                            type=int,
+                            help='ID of the message advertising users to react with thumbs up')
 
-    def handle(self, *args, **options):
-        # type: (*Any, **Any) -> None
+    def handle(self, *args: Any, **options: Any) -> None:
         logging.info("Starting UserMessage batch thread %s" % (options['thread'],))
         files = set(glob.glob(os.path.join(options['path'], 'messages-*.json.partial')))
         for partial_path in files:
@@ -46,7 +43,7 @@ class Command(BaseCommand):
                 continue
             logging.info("Thread %s processing %s" % (options['thread'], output_path))
             try:
-                export_usermessages_batch(locked_path, output_path)
+                export_usermessages_batch(locked_path, output_path, options["consent_message_id"])
             except Exception:
                 # Put the item back in the free pool when we fail
                 shutil.move(locked_path, partial_path)

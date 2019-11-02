@@ -1,0 +1,23 @@
+# To build run `docker build -f Dockerfile-postgresql .` from the root of the
+# zulip repo.
+
+# Currently the postgres images do not support automatic upgrading of
+# the on-disk data in volumes. So the base image can not currently be upgraded
+# without users needing a manual pgdump and restore.
+
+# Install hunspell, zulip stop words, and run zulip database
+# init.
+FROM postgres:10
+COPY puppet/zulip/files/postgresql/zulip_english.stop /usr/share/postgresql/$PG_MAJOR/tsearch_data/zulip_english.stop
+COPY scripts/setup/create-db.sql /docker-entrypoint-initdb.d/zulip-create-db.sql
+COPY scripts/setup/create-pgroonga.sql /docker-entrypoint-initdb.d/zulip-create-pgroonga.sql
+COPY scripts/setup/pgroonga-debian.asc /tmp
+RUN apt-key add /tmp/pgroonga-debian.asc \
+    && echo "deb http://packages.groonga.org/debian/ stretch main" > /etc/apt/sources.list.d/zulip.list \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+       hunspell-en-us \
+       postgresql-${PG_MAJOR}-pgroonga \
+    && ln -sf /var/cache/postgresql/dicts/en_us.dict "/usr/share/postgresql/$PG_MAJOR/tsearch_data/en_us.dict" \
+    && ln -sf /var/cache/postgresql/dicts/en_us.affix "/usr/share/postgresql/$PG_MAJOR/tsearch_data/en_us.affix" \
+    && rm -rf /var/lib/apt/lists/*

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # Copyright © 2014 Dropbox, Inc.
@@ -21,11 +21,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from __future__ import print_function
 import sys
-import os.path
-import optparse
-import time
+import os
+import argparse
 import json
 usage = """Export all messages on a given stream to a JSON dump.
 
@@ -40,10 +38,9 @@ This script requires the Zulip API bindings to be installed."""
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../api'))
 import zulip
 
-parser = optparse.OptionParser(usage=usage)
-parser.add_option_group(zulip.generate_option_group(parser))
-parser.add_option('--stream', default='')
-(options, args) = parser.parse_args()
+parser = zulip.add_default_arguments(argparse.ArgumentParser(usage=usage))
+parser.add_argument('--stream', default='', action="store")
+options = parser.parse_args()
 
 client = zulip.init_from_options(options)
 
@@ -53,16 +50,24 @@ if options.stream == "":
 
 client.add_subscriptions([{"name": options.stream}])
 queue = client.register(event_types=['message'])
-client._register('get_old_messages', method='GET', url='messages')
 max_id = queue['max_message_id']
 messages = []
+request = {
+    'anchor': 0,
+    'num_before': 0,
+    'num_after': max_id,
+    'narrow': [{'operator': 'stream',
+                'operand': options.stream}],
+    'apply_markdown': False,
+}
+
 print("Fetching messages...")
-result = client.get_old_messages({'anchor': 0,
-                                  'num_before': 0,
-                                  'num_after': max_id,
-                                  'narrow': [{'operator': 'stream',
-                                             'operand': options.stream}],
-                                  'apply_markdown': False})
+result = client.call_endpoint(
+    url='messages',
+    method='GET',
+    request=request,
+)
+
 if result['result'] != 'success':
     print("Unfortunately, there was an error fetching some old messages.")
     print(result)
@@ -71,15 +76,14 @@ for msg in result['messages']:
     if msg['type'] != 'stream':
         continue
     # Remove extraneous metadata
-    for k in ['flags', 'edit_history', 'subject_links', 'gravatar_hash',
+    for k in ['flags', 'edit_history', 'subject_links',
               'avatar_url', 'recipient_id', 'sender_short_name',
-              'content_type', 'client', 'sender_domain', 'id', 'type']:
+              'content_type', 'client', 'sender_realm_str', 'id', 'type']:
         msg.pop(k, None)
     messages.append(msg)
 
 filename = "zulip-%s.json" % (options.stream,)
-f = open(filename, mode="wb")
-f.write(json.dumps(messages, indent=0, sort_keys=False).encode('utf-8'))
-f.close()
+with open(filename, 'wb') as f:
+    f.write(json.dumps(messages, indent=0, sort_keys=False).encode('utf-8'))
 print("%d messages exported to %s" % (len(messages), filename,))
 sys.exit(0)

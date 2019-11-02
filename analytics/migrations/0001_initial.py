@@ -1,15 +1,12 @@
 # -*- coding: utf-8 -*-
-from __future__ import unicode_literals
-
-from django.db import models, migrations
+import django.db.models.deletion
 from django.conf import settings
-import zerver.lib.str_utils
-
+from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('zerver', '0028_userprofile_tos_version'),
+        ('zerver', '0030_realm_org_type'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -20,74 +17,75 @@ class Migration(migrations.Migration):
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
                 ('info', models.CharField(max_length=1000)),
             ],
-            bases=(zerver.lib.str_utils.ModelReprMixin, models.Model),
+            bases=(models.Model,),
         ),
         migrations.CreateModel(
             name='HuddleCount',
             fields=[
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
-                ('value', models.BigIntegerField()),
+                ('huddle', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='zerver.Recipient')),
+                ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL)),
                 ('property', models.CharField(max_length=40)),
                 ('end_time', models.DateTimeField()),
                 ('interval', models.CharField(max_length=20)),
-                ('anomaly', models.ForeignKey(to='analytics.Anomaly', null=True)),
-                ('huddle', models.ForeignKey(to='zerver.Recipient')),
-                ('user', models.ForeignKey(to=settings.AUTH_USER_MODEL)),
+                ('value', models.BigIntegerField()),
+                ('anomaly', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='analytics.Anomaly', null=True)),
             ],
-            bases=(zerver.lib.str_utils.ModelReprMixin, models.Model),
+            bases=(models.Model,),
         ),
         migrations.CreateModel(
             name='InstallationCount',
             fields=[
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
-                ('value', models.BigIntegerField()),
                 ('property', models.CharField(max_length=40)),
                 ('end_time', models.DateTimeField()),
                 ('interval', models.CharField(max_length=20)),
-                ('anomaly', models.ForeignKey(to='analytics.Anomaly', null=True)),
+                ('value', models.BigIntegerField()),
+                ('anomaly', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='analytics.Anomaly', null=True)),
             ],
-            bases=(zerver.lib.str_utils.ModelReprMixin, models.Model),
+            bases=(models.Model,),
         ),
         migrations.CreateModel(
             name='RealmCount',
             fields=[
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
-                ('value', models.BigIntegerField()),
+                ('realm', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='zerver.Realm')),
                 ('property', models.CharField(max_length=40)),
                 ('end_time', models.DateTimeField()),
                 ('interval', models.CharField(max_length=20)),
-                ('anomaly', models.ForeignKey(to='analytics.Anomaly', null=True)),
-                ('realm', models.ForeignKey(to='zerver.Realm')),
+                ('value', models.BigIntegerField()),
+                ('anomaly', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='analytics.Anomaly', null=True)),
+
             ],
-            bases=(zerver.lib.str_utils.ModelReprMixin, models.Model),
+            bases=(models.Model,),
         ),
         migrations.CreateModel(
             name='StreamCount',
             fields=[
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
-                ('value', models.BigIntegerField()),
+                ('realm', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='zerver.Realm')),
+                ('stream', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='zerver.Stream')),
                 ('property', models.CharField(max_length=40)),
                 ('end_time', models.DateTimeField()),
                 ('interval', models.CharField(max_length=20)),
-                ('anomaly', models.ForeignKey(to='analytics.Anomaly', null=True)),
-                ('realm', models.ForeignKey(to='zerver.Realm')),
-                ('stream', models.ForeignKey(to='zerver.Stream')),
+                ('value', models.BigIntegerField()),
+                ('anomaly', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='analytics.Anomaly', null=True)),
             ],
-            bases=(zerver.lib.str_utils.ModelReprMixin, models.Model),
+            bases=(models.Model,),
         ),
         migrations.CreateModel(
             name='UserCount',
             fields=[
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
-                ('value', models.BigIntegerField()),
+                ('realm', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='zerver.Realm')),
+                ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL)),
                 ('property', models.CharField(max_length=40)),
                 ('end_time', models.DateTimeField()),
                 ('interval', models.CharField(max_length=20)),
-                ('anomaly', models.ForeignKey(to='analytics.Anomaly', null=True)),
-                ('realm', models.ForeignKey(to='zerver.Realm')),
-                ('user', models.ForeignKey(to=settings.AUTH_USER_MODEL)),
+                ('value', models.BigIntegerField()),
+                ('anomaly', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='analytics.Anomaly', null=True)),
             ],
-            bases=(zerver.lib.str_utils.ModelReprMixin, models.Model),
+            bases=(models.Model,),
         ),
         migrations.AlterUniqueTogether(
             name='usercount',

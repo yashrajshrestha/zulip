@@ -4,148 +4,179 @@
 
 __revision__ = '$Id: models.py 28 2009-10-22 15:03:02Z jarek.zgoda $'
 
-import re
+import datetime
 
 from django.db import models
-from django.core.urlresolvers import reverse
-from django.core.mail import send_mail
+from django.db.models import CASCADE
+from django.urls import reverse
 from django.conf import settings
-from django.template import loader, Context
-from django.contrib.sites.models import Site
 from django.contrib.contenttypes.models import ContentType
-from django.contrib.contenttypes import generic
-from django.utils.translation import ugettext_lazy as _
-from django.utils.timezone import now
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.http import HttpRequest, HttpResponse
+from django.shortcuts import render
+from django.utils.timezone import now as timezone_now
 
-from confirmation.util import get_status_field
-from zerver.lib.utils import generate_random_token
-from zerver.models import PreregistrationUser
-from typing import Optional, Union, Any
-from six import text_type
+from zerver.models import PreregistrationUser, EmailChangeStatus, MultiuseInvite, \
+    UserProfile, Realm
+from random import SystemRandom
+import string
+from typing import Dict, Optional, Union
 
-try:
-    import mailer
-    send_mail = mailer.send_mail
-except ImportError:
-    # no mailer app present, stick with default
-    pass
+class ConfirmationKeyException(Exception):
+    WRONG_LENGTH = 1
+    EXPIRED = 2
+    DOES_NOT_EXIST = 3
 
+    def __init__(self, error_type: int) -> None:
+        super().__init__()
+        self.error_type = error_type
 
-B16_RE = re.compile('^[a-f0-9]{40}$')
+def render_confirmation_key_error(request: HttpRequest, exception: ConfirmationKeyException) -> HttpResponse:
+    if exception.error_type == ConfirmationKeyException.WRONG_LENGTH:
+        return render(request, 'confirmation/link_malformed.html')
+    if exception.error_type == ConfirmationKeyException.EXPIRED:
+        return render(request, 'confirmation/link_expired.html')
+    return render(request, 'confirmation/link_does_not_exist.html')
 
-def check_key_is_valid(creation_key):
-    # type: (text_type) -> bool
-    if not RealmCreationKey.objects.filter(creation_key=creation_key).exists():
-        return False
-    days_sofar = (now() - RealmCreationKey.objects.get(creation_key=creation_key).date_created).days
-    # Realm creation link expires after settings.REALM_CREATION_LINK_VALIDITY_DAYS
-    if days_sofar <= settings.REALM_CREATION_LINK_VALIDITY_DAYS:
-        return True
-    return False
+def generate_key() -> str:
+    generator = SystemRandom()
+    # 24 characters * 5 bits of entropy/character = 120 bits of entropy
+    return ''.join(generator.choice(string.ascii_lowercase + string.digits) for _ in range(24))
 
-def generate_key():
-    # type: () -> text_type
-    return generate_random_token(40)
+ConfirmationObjT = Union[MultiuseInvite, PreregistrationUser, EmailChangeStatus]
+def get_object_from_key(confirmation_key: str,
+                        confirmation_type: int) -> ConfirmationObjT:
+    # Confirmation keys used to be 40 characters
+    if len(confirmation_key) not in (24, 40):
+        raise ConfirmationKeyException(ConfirmationKeyException.WRONG_LENGTH)
+    try:
+        confirmation = Confirmation.objects.get(confirmation_key=confirmation_key,
+                                                type=confirmation_type)
+    except Confirmation.DoesNotExist:
+        raise ConfirmationKeyException(ConfirmationKeyException.DOES_NOT_EXIST)
 
-def generate_activation_url(key, host=None):
-    # type: (text_type, Optional[str]) -> text_type
-    if host is None:
-        host = settings.EXTERNAL_HOST
-    return u'%s%s%s' % (settings.EXTERNAL_URI_SCHEME,
-                        host,
-                        reverse('confirmation.views.confirm',
-                                kwargs={'confirmation_key': key}))
+    time_elapsed = timezone_now() - confirmation.date_sent
+    if time_elapsed.total_seconds() > _properties[confirmation.type].validity_in_days * 24 * 3600:
+        raise ConfirmationKeyException(ConfirmationKeyException.EXPIRED)
 
-def generate_realm_creation_url():
-    # type: () -> text_type
+    obj = confirmation.content_object
+    if hasattr(obj, "status"):
+        obj.status = getattr(settings, 'STATUS_ACTIVE', 1)
+        obj.save(update_fields=['status'])
+    return obj
+
+def create_confirmation_link(obj: ContentType, host: str,
+                             confirmation_type: int,
+                             url_args: Optional[Dict[str, str]]=None) -> str:
     key = generate_key()
-    RealmCreationKey.objects.create(creation_key=key, date_created=now())
-    return u'%s%s%s' % (settings.EXTERNAL_URI_SCHEME,
-                        settings.EXTERNAL_HOST,
-                        reverse('zerver.views.create_realm',
-                        kwargs={'creation_key': key}))
+    realm = None
+    if hasattr(obj, 'realm'):
+        realm = obj.realm
+    elif isinstance(obj, Realm):
+        realm = obj
 
-class ConfirmationManager(models.Manager):
+    Confirmation.objects.create(content_object=obj, date_sent=timezone_now(), confirmation_key=key,
+                                realm=realm, type=confirmation_type)
+    return confirmation_url(key, host, confirmation_type, url_args)
 
-    def confirm(self, confirmation_key):
-        # type: (str) -> Union[bool, PreregistrationUser]
-        if B16_RE.search(confirmation_key):
-            try:
-                confirmation = self.get(confirmation_key=confirmation_key)
-            except self.model.DoesNotExist:
-                return False
-            obj = confirmation.content_object
-            status_field = get_status_field(obj._meta.app_label, obj._meta.model_name)
-            setattr(obj, status_field, getattr(settings, 'STATUS_ACTIVE', 1))
-            obj.save()
-            return obj
-        return False
-
-    def get_link_for_object(self, obj, host=None):
-        # type: (Union[ContentType, int], Optional[str]) -> text_type
-        key = generate_key()
-        self.create(content_object=obj, date_sent=now(), confirmation_key=key)
-        return generate_activation_url(key, host=host)
-
-    def send_confirmation(self, obj, email_address, additional_context=None,
-                          subject_template_path=None, body_template_path=None,
-                          host=None):
-        # type: (ContentType, text_type, Optional[Dict[str, Any]], Optional[str], Optional[str], Optional[str]) -> Confirmation
-        confirmation_key = generate_key()
-        current_site = Site.objects.get_current()
-        activate_url = generate_activation_url(confirmation_key, host=host)
-        context = Context({
-            'activate_url': activate_url,
-            'current_site': current_site,
-            'confirmation_key': confirmation_key,
-            'target': obj,
-            'days': getattr(settings, 'EMAIL_CONFIRMATION_DAYS', 10),
-        })
-        if additional_context is not None:
-            context.update(additional_context)
-        if obj.realm is not None and obj.realm.is_zephyr_mirror_realm:
-            template_name = "mituser"
-        else:
-            template_name = obj._meta.model_name
-        templates = [
-            'confirmation/%s_confirmation_email_subject.txt' % (template_name,),
-            'confirmation/confirmation_email_subject.txt',
-        ]
-        if subject_template_path:
-            template = loader.get_template(subject_template_path)
-        else:
-            template = loader.select_template(templates)
-        subject = template.render(context).strip().replace(u'\n', u' ') # no newlines, please
-        templates = [
-            'confirmation/%s_confirmation_email_body.txt' % (template_name,),
-            'confirmation/confirmation_email_body.txt',
-        ]
-        if body_template_path:
-            template = loader.get_template(body_template_path)
-        else:
-            template = loader.select_template(templates)
-        body = template.render(context)
-        send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [email_address])
-        return self.create(content_object=obj, date_sent=now(), confirmation_key=confirmation_key)
-
+def confirmation_url(confirmation_key: str, host: str,
+                     confirmation_type: int,
+                     url_args: Optional[Dict[str, str]]=None) -> str:
+    if url_args is None:
+        url_args = {}
+    url_args['confirmation_key'] = confirmation_key
+    return '%s%s%s' % (settings.EXTERNAL_URI_SCHEME, host,
+                       reverse(_properties[confirmation_type].url_name, kwargs=url_args))
 
 class Confirmation(models.Model):
-    content_type = models.ForeignKey(ContentType)
-    object_id = models.PositiveIntegerField()
-    content_object = generic.GenericForeignKey('content_type', 'object_id')
-    date_sent = models.DateTimeField(_('sent'))
-    confirmation_key = models.CharField(_('activation key'), max_length=40)
+    content_type = models.ForeignKey(ContentType, on_delete=CASCADE)
+    object_id = models.PositiveIntegerField()  # type: int
+    content_object = GenericForeignKey('content_type', 'object_id')
+    date_sent = models.DateTimeField()  # type: datetime.datetime
+    confirmation_key = models.CharField(max_length=40)  # type: str
+    realm = models.ForeignKey(Realm, null=True, on_delete=CASCADE)  # type: Optional[Realm]
 
-    objects = ConfirmationManager()
+    # The following list is the set of valid types
+    USER_REGISTRATION = 1
+    INVITATION = 2
+    EMAIL_CHANGE = 3
+    UNSUBSCRIBE = 4
+    SERVER_REGISTRATION = 5
+    MULTIUSE_INVITE = 6
+    REALM_CREATION = 7
+    REALM_REACTIVATION = 8
+    type = models.PositiveSmallIntegerField()  # type: int
 
-    class Meta(object):
-        verbose_name = _('confirmation email')
-        verbose_name_plural = _('confirmation emails')
+    def __str__(self) -> str:
+        return '<Confirmation: %s>' % (self.content_object,)
 
-    def __unicode__(self):
-        # type: () -> text_type
-        return _('confirmation email for %s') % (self.content_object,)
+class ConfirmationType:
+    def __init__(self, url_name: str,
+                 validity_in_days: int=settings.CONFIRMATION_LINK_DEFAULT_VALIDITY_DAYS) -> None:
+        self.url_name = url_name
+        self.validity_in_days = validity_in_days
+
+_properties = {
+    Confirmation.USER_REGISTRATION: ConfirmationType('check_prereg_key_and_redirect'),
+    Confirmation.INVITATION: ConfirmationType('check_prereg_key_and_redirect',
+                                              validity_in_days=settings.INVITATION_LINK_VALIDITY_DAYS),
+    Confirmation.EMAIL_CHANGE: ConfirmationType('zerver.views.user_settings.confirm_email_change'),
+    Confirmation.UNSUBSCRIBE: ConfirmationType('zerver.views.unsubscribe.email_unsubscribe',
+                                               validity_in_days=1000000),  # should never expire
+    Confirmation.MULTIUSE_INVITE: ConfirmationType(
+        'zerver.views.registration.accounts_home_from_multiuse_invite',
+        validity_in_days=settings.INVITATION_LINK_VALIDITY_DAYS),
+    Confirmation.REALM_CREATION: ConfirmationType('check_prereg_key_and_redirect'),
+    Confirmation.REALM_REACTIVATION: ConfirmationType('zerver.views.realm.realm_reactivation'),
+}
+
+def one_click_unsubscribe_link(user_profile: UserProfile, email_type: str) -> str:
+    """
+    Generate a unique link that a logged-out user can visit to unsubscribe from
+    Zulip e-mails without having to first log in.
+    """
+    return create_confirmation_link(user_profile, user_profile.realm.host,
+                                    Confirmation.UNSUBSCRIBE,
+                                    url_args = {'email_type': email_type})
+
+# Functions related to links generated by the generate_realm_creation_link.py
+# management command.
+# Note that being validated here will just allow the user to access the create_realm
+# form, where they will enter their email and go through the regular
+# Confirmation.REALM_CREATION pathway.
+# Arguably RealmCreationKey should just be another ConfirmationObjT and we should
+# add another Confirmation.type for this; it's this way for historical reasons.
+
+def validate_key(creation_key: Optional[str]) -> Optional['RealmCreationKey']:
+    """Get the record for this key, raising InvalidCreationKey if non-None but invalid."""
+    if creation_key is None:
+        return None
+    try:
+        key_record = RealmCreationKey.objects.get(creation_key=creation_key)
+    except RealmCreationKey.DoesNotExist:
+        raise RealmCreationKey.Invalid()
+    time_elapsed = timezone_now() - key_record.date_created
+    if time_elapsed.total_seconds() > settings.REALM_CREATION_LINK_VALIDITY_DAYS * 24 * 3600:
+        raise RealmCreationKey.Invalid()
+    return key_record
+
+def generate_realm_creation_url(by_admin: bool=False) -> str:
+    key = generate_key()
+    RealmCreationKey.objects.create(creation_key=key,
+                                    date_created=timezone_now(),
+                                    presume_email_valid=by_admin)
+    return '%s%s%s' % (settings.EXTERNAL_URI_SCHEME,
+                       settings.EXTERNAL_HOST,
+                       reverse('zerver.views.create_realm',
+                               kwargs={'creation_key': key}))
 
 class RealmCreationKey(models.Model):
-    creation_key = models.CharField(_('activation key'), max_length=40)
-    date_created = models.DateTimeField(_('created'), default=now)
+    creation_key = models.CharField('activation key', max_length=40)
+    date_created = models.DateTimeField('created', default=timezone_now)
+
+    # True just if we should presume the email address the user enters
+    # is theirs, and skip sending mail to it to confirm that.
+    presume_email_valid = models.BooleanField(default=False)  # type: bool
+
+    class Invalid(Exception):
+        pass

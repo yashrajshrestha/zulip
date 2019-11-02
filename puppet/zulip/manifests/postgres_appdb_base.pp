@@ -2,96 +2,88 @@
 class zulip::postgres_appdb_base {
   include zulip::postgres_common
   include zulip::supervisor
+  include zulip::process_fts_updates
 
-  $appdb_packages = [# Needed to run process_fts_updates
-                     "python-psycopg2", # TODO: use a virtualenv instead
-                     # Needed for our full text search system
-                     "postgresql-${zulip::base::postgres_version}-tsearch-extras",
-                     ]
-  define safepackage ( $ensure = present ) {
-    if !defined(Package[$title]) {
-      package { $title: ensure => $ensure }
+  case $::osfamily {
+    'debian': {
+      include zulip::apt_repository
+      $postgresql = "postgresql-${zulip::base::postgres_version}"
+      $postgres_sharedir = "/usr/share/postgresql/${zulip::base::postgres_version}"
+      $tsearch_datadir = "${postgres_sharedir}/tsearch_data"
+      $pgroonga_setup_sql_path = "${postgres_sharedir}/pgroonga_setup.sql"
+      $setup_system_deps = 'setup_apt_repo'
+    }
+    'redhat': {
+      include zulip::yum_repository
+      $postgresql = "postgresql${zulip::base::postgres_version}"
+      $postgres_sharedir = "/usr/pgsql-${zulip::base::postgres_version}/share"
+      $tsearch_datadir = "${postgres_sharedir}/tsearch_data/"
+      $pgroonga_setup_sql_path = "${postgres_sharedir}/pgroonga_setup.sql"
+      $setup_system_deps = 'setup_yum_repo'
+    }
+    default: {
+      fail('osfamily not supported')
     }
   }
-  safepackage { $appdb_packages: ensure => "installed" }
 
   # We bundle a bunch of other sysctl parameters into 40-postgresql.conf
   file { '/etc/sysctl.d/30-postgresql-shm.conf':
     ensure => absent,
   }
 
-  file { "/usr/local/bin/process_fts_updates":
-    ensure => file,
-    owner => "root",
-    group => "root",
-    mode => 755,
-    source => "puppet:///modules/zulip/postgresql/process_fts_updates",
+  file { "${tsearch_datadir}/en_us.dict":
+    ensure  => 'link',
+    require => Package[$postgresql],
+    target  => '/var/cache/postgresql/dicts/en_us.dict',  # TODO check cache dir on CentOS
   }
+  file { "${tsearch_datadir}/en_us.affix":
+    ensure  => 'link',
+    require => Package[$postgresql],
+    target  => '/var/cache/postgresql/dicts/en_us.affix',  # TODO check cache dir on CentOS
 
-  file { "/etc/supervisor/conf.d/zulip_db.conf":
-    require => Package[supervisor],
-    ensure => file,
-    owner => "root",
-    group => "root",
-    mode => 644,
-    source => "puppet:///modules/zulip/supervisor/conf.d/zulip_db.conf",
-    notify => Service[supervisor],
   }
-
-  file { "/usr/share/postgresql/${zulip::base::postgres_version}/tsearch_data/en_us.dict":
-    require => Package["postgresql-${zulip::base::postgres_version}"],
-    ensure => 'link',
-    target => '/var/cache/postgresql/dicts/en_us.dict',
+  file { "${tsearch_datadir}/zulip_english.stop":
+    ensure  => file,
+    require => Package[$postgresql],
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    source  => 'puppet:///modules/zulip/postgresql/zulip_english.stop',
   }
-  file { "/usr/share/postgresql/${zulip::base::postgres_version}/tsearch_data/en_us.affix":
-    require => Package["postgresql-${zulip::base::postgres_version}"],
-    ensure => 'link',
-    target => '/var/cache/postgresql/dicts/en_us.affix',
-  }
-  file { "/usr/share/postgresql/${zulip::base::postgres_version}/tsearch_data/zulip_english.stop":
-    require => Package["postgresql-${zulip::base::postgres_version}"],
-    ensure => file,
-    owner => "root",
-    group => "root",
-    mode => 644,
-    source => "puppet:///modules/zulip/postgresql/zulip_english.stop",
-  }
-  file { "/usr/lib/nagios/plugins/zulip_postgres_appdb":
-    require => Package[nagios-plugins-basic],
+  file { "${zulip::common::nagios_plugins_dir}/zulip_postgres_appdb":
+    require => Package[$zulip::common::nagios_plugins],
     recurse => true,
-    purge => true,
-    owner => "root",
-    group => "root",
-    mode => 755,
-    source => "puppet:///modules/zulip/nagios_plugins/zulip_postgres_appdb",
+    purge   => true,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0755',
+    source  => 'puppet:///modules/zulip/nagios_plugins/zulip_postgres_appdb',
   }
 
-  $pgroonga = zulipconf("machine", "pgroonga", "")
-  if $pgroonga == "enabled" {
-    apt::ppa {'ppa:groonga/ppa':
-      before => Package["postgresql-${zulip::base::postgres_version}-pgroonga"],
-    }
-
+  $pgroonga = zulipconf('machine', 'pgroonga', '')
+  if $pgroonga == 'enabled' {
     # Needed for optional our full text search system
-    package{"postgresql-${zulip::base::postgres_version}-pgroonga":
-      require => Package["postgresql-${zulip::base::postgres_version}"],
-      ensure => "installed",
+    package{"${postgresql}-pgroonga":
+      ensure  => 'installed',
+      require => [Package[$postgresql],
+                  Exec[$setup_system_deps]],
     }
 
-    $pgroonga_setup_sql_path = "/usr/share/postgresql/${zulip::base::postgres_version}/pgroonga_setup.sql"
     file { $pgroonga_setup_sql_path:
-      require => Package["postgresql-${zulip::base::postgres_version}-pgroonga"],
-      ensure => file,
-      owner  => "postgres",
-      group  => "postgres",
-      mode => 640,
-      source => "puppet:///modules/zulip/postgresql/pgroonga_setup.sql",
+      ensure  => file,
+      require => Package["${postgresql}-pgroonga"],
+      owner   => 'postgres',
+      group   => 'postgres',
+      mode    => '0640',
+      source  => 'puppet:///modules/zulip/postgresql/pgroonga_setup.sql',
     }
 
-    exec{"create_pgroonga_extension":
-      require => File["$pgroonga_setup_sql_path"],
-      command  => "bash -c 'cat $pgroonga_setup_sql_path | psql -v ON_ERROR_STOP=1 zulip && touch $pgroonga_setup_sql_path.applied'",
-      creates  => "$pgroonga_setup_sql_path.applied",
+    exec{'create_pgroonga_extension':
+      require => File[$pgroonga_setup_sql_path],
+      # lint:ignore:140chars
+      command => "bash -c 'cat ${pgroonga_setup_sql_path} | su postgres -c \"psql -v ON_ERROR_STOP=1 zulip\" && touch ${pgroonga_setup_sql_path}.applied'",
+      # lint:endignore
+      creates => "${pgroonga_setup_sql_path}.applied",
     }
   }
 }

@@ -1,0 +1,20 @@
+<span class="message_sender no-select">
+    <span class="sender_info_hover">
+        {{> message_avatar}}
+    </span>
+
+    <span class="sender-status">
+        <span class="sender_info_hover sender_name-in-status auto-select" role="button" tabindex="0">{{msg/sender_full_name}}</span>
+        {{#if sender_is_bot}}
+        <i class="zulip-icon bot" aria-label="{{t 'Bot' }}"></i>
+        {{/if}}
+
+        <span class="status-message auto-select">
+            {{{ status_message }}}
+        </span>
+
+        {{#if edited_status_msg}}
+        {{> edited_notice}}
+        {{/if}}
+    </span>
+</span>

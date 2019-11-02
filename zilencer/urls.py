@@ -1,25 +1,32 @@
-from django.conf.urls import patterns, url, include
+from typing import Any
 
-i18n_urlpatterns = [
-    # SSO dispatch page for desktop app with SSO
-    # Allows the user to enter their email address only,
-    # and then redirects the user to the proper deployment
-    # SSO-login page
-    url(r'^accounts/deployment_dispatch$',
-        'zilencer.views.account_deployment_dispatch',
-        {'template_name': 'zerver/login.html'}),
-]
+from django.conf.urls import include, url
+
+import zilencer.views
+from zerver.lib.rest import rest_dispatch
+
+i18n_urlpatterns = []  # type: Any
 
 # Zilencer views following the REST API style
 v1_api_and_json_patterns = [
-    url('^deployment/feedback$', 'zerver.lib.rest.rest_dispatch',
-          {'POST': 'zilencer.views.submit_feedback'}),
-    url('^deployment/report_error$', 'zerver.lib.rest.rest_dispatch',
-          {'POST': 'zilencer.views.report_error'}),
-    url('^deployment/endpoints$', 'zilencer.views.lookup_endpoints_for_user'),
+    url('^remotes/push/register$', rest_dispatch,
+        {'POST': 'zilencer.views.register_remote_push_device'}),
+    url('^remotes/push/unregister$', rest_dispatch,
+        {'POST': 'zilencer.views.unregister_remote_push_device'}),
+    url('^remotes/push/notify$', rest_dispatch,
+        {'POST': 'zilencer.views.remote_server_notify_push'}),
+
+    # Push signup doesn't use the REST API, since there's no auth.
+    url('^remotes/server/register$', zilencer.views.register_remote_server),
+
+    # For receiving table data used in analytics and billing
+    url('^remotes/server/analytics$', rest_dispatch,
+        {'POST': 'zilencer.views.remote_server_post_analytics'}),
+    url('^remotes/server/analytics/status$', rest_dispatch,
+        {'GET': 'zilencer.views.remote_server_check_analytics'}),
 ]
 
 urlpatterns = [
     url(r'^api/v1/', include(v1_api_and_json_patterns)),
     url(r'^json/', include(v1_api_and_json_patterns)),
-] + i18n_urlpatterns
+]

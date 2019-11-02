@@ -1,15 +1,36 @@
-from django.conf.urls import patterns, url
-from django.views.generic import TemplateView, RedirectView
+from typing import Any
+
+from django.views.generic import TemplateView
+from django.conf.urls import include, url
+
+import corporate.views
+from zerver.lib.rest import rest_dispatch
 
 i18n_urlpatterns = [
     # Zephyr/MIT
     url(r'^zephyr/$', TemplateView.as_view(template_name='corporate/zephyr.html')),
-    url(r'^mit/$', TemplateView.as_view(template_name='corporate/mit.html')),
     url(r'^zephyr-mirror/$', TemplateView.as_view(template_name='corporate/zephyr-mirror.html')),
 
-    # Terms of service and privacy policy
-    url(r'^terms-enterprise/$',  TemplateView.as_view(template_name='corporate/terms-enterprise.html')),
-    url(r'^privacy/$', TemplateView.as_view(template_name='corporate/privacy.html')),
+    url(r'^jobs/$', TemplateView.as_view(template_name='corporate/jobs.html')),
+
+    # Billing
+    url(r'^billing/$', corporate.views.billing_home, name='corporate.views.billing_home'),
+    url(r'^upgrade/$', corporate.views.initial_upgrade, name='corporate.views.initial_upgrade'),
+]  # type: Any
+
+v1_api_and_json_patterns = [
+    url(r'^billing/upgrade$', rest_dispatch,
+        {'POST': 'corporate.views.upgrade'}),
+    url(r'^billing/plan/change$', rest_dispatch,
+        {'POST': 'corporate.views.change_plan_at_end_of_cycle'}),
+    url(r'^billing/sources/change', rest_dispatch,
+        {'POST': 'corporate.views.replace_payment_source'}),
 ]
 
-urlpatterns = patterns('', *i18n_urlpatterns)
+# Make a copy of i18n_urlpatterns so that they appear without prefix for English
+urlpatterns = list(i18n_urlpatterns)
+
+urlpatterns += [
+    url(r'^api/v1/', include(v1_api_and_json_patterns)),
+    url(r'^json/', include(v1_api_and_json_patterns)),
+]

@@ -51,8 +51,6 @@
  */
 ;(function($) {
 
-  jQuery.event.props.push("dataTransfer");
-
   var default_opts = {
       fallback_id: '',
       url: '',
@@ -60,10 +58,10 @@
       paramname: 'userfile',
       allowedfiletypes:[],
       raw_droppable:[],
-      maxfiles: 25,           // Ignored if queuefiles is set > 0
-      maxfilesize: 1,         // MB file size limit
-      queuefiles: 0,          // Max files before queueing (for large volume uploads)
-      queuewait: 200,         // Queue wait time if full
+      maxfiles: 25,             // Ignored if queuefiles is set > 0
+      max_file_upload_size: 1,  // MB file size limit
+      queuefiles: 0,            // Max files before queueing (for large volume uploads)
+      queuewait: 200,           // Queue wait time if full
       data: {},
       headers: {},
       drop: empty,
@@ -78,7 +76,7 @@
       beforeEach: empty,
       afterAll: empty,
       rename: empty,
-      error: function(err, file, i, status) {
+      error: function(err, response, file, i) {
         alert(err);
       },
       uploadStarted: empty,
@@ -113,6 +111,11 @@
     });
 
     function drop(e) {
+      if (!e.originalEvent.dataTransfer) {
+        return;
+      }
+
+      files = e.originalEvent.dataTransfer.files;
 
       function has_type(dom_stringlist, type) {
         var j;
@@ -124,19 +127,18 @@
         return false;
       }
 
-      if (e.dataTransfer.files.length === 0) {
+      if (files.length === 0) {
         var i;
         for (i = 0; i < opts.raw_droppable.length; i++) {
           var type = opts.raw_droppable[i];
-          if (has_type(e.dataTransfer.types, type)) {
-            opts.rawDrop(e.dataTransfer.getData(type));
+          if (has_type(e.originalEvent.dataTransfer.types, type)) {
+            opts.rawDrop(e.originalEvent.dataTransfer.getData(type));
             return false;
           }
         }
       }
 
       if( opts.drop.call(this, e) === false ) return false;
-      files = e.dataTransfer.files;
       if (files === null || files === undefined || files.length === 0) {
         opts.error(errors[0]);
         return false;
@@ -149,11 +151,11 @@
 
     function sendRawImageData(event, image) {
       function finished_callback(serverResponse, timeDiff, xhr) {
-        return opts.uploadFinished(-1, undefined, serverResponse, timeDiff, xhr);
+        return opts.uploadFinished(-1, image.file, serverResponse, timeDiff, xhr);
       }
 
       var url_params = "?mimetype=" + encodeURIComponent(image.type);
-      do_xhr("pasted_image", image.data, image.type, {}, url_params, finished_callback, function () {});
+      do_xhr("pasted_image", image.data, image.type, {file: image.file}, url_params, finished_callback, function () {});
     }
 
     function uploadRawImageData(event, image) {
@@ -162,22 +164,52 @@
       sendRawImageData(event, image);
     }
 
+    function dataIsImage(data) {
+      // Check if the clipboard data is actually an image or a thumbnail of the
+      // copied text.
+
+      var text = data.getData('text/html');
+
+      if (!text) {
+        // No html is present, when pasting from image viewers or a screenshot
+        return true;
+      }
+
+      try {
+        var html = $.parseHTML(text);
+      } catch(e) {
+        // This is really a problem with the software, where we copied the text
+        // from - but we just let the default browser behavior prevail
+        return false;
+      }
+
+      // Some software like MS Word adds an image thumbnail, when text is
+      // copied. We would like to paste the actual text, instead of the
+      // thumbnail image in this case.
+
+      // When an image copied in a (modern?) Browser, a 'text/html' item is
+      // present in the clipboard, which has an img tag for the copied image
+      // (along with may be a meta tag)
+
+      var allowedTags = ["META", "IMG"];
+      for (var i=0; i < html.length; i += 1){
+        if (allowedTags.indexOf(html[i].nodeName) < 0){
+          return false;
+        }
+      }
+      return true;
+    }
+
     function paste(event) {
       if (event.originalEvent.clipboardData === undefined ||
           event.originalEvent.clipboardData.items === undefined) {
         return;
       }
 
-      // Check if any of the items are strings, and if they are,
-      // then return, since we want the default browser behavior
-      // to deal with those.
-
-      var itemsLength = event.originalEvent.clipboardData.items.length;
-
-      for (var i = 0; i <  itemsLength; i++) {
-        if (event.originalEvent.clipboardData.items[i].kind === "string") {
-          return;
-        }
+      // Check if the data in the clipboard is really an image, or just a
+      // thumbnail of the copied text.
+      if (!dataIsImage(event.originalEvent.clipboardData)){
+        return;
       }
 
       // Take the first image pasted in the clipboard
@@ -201,9 +233,15 @@
       var data = item.getAsFile();
       var reader = new FileReader();
       reader.onload = function(event) {
-        sendRawImageData(event, {type: data.type, data: event.target.result});
+        sendRawImageData(event, {type: data.type, data: event.target.result, file: data});
       };
       reader.readAsBinaryString(data);
+      opts.uploadStarted(undefined, data);
+
+      // Once the upload has started, the event needn't be processed further. This seems to be required on Safari to
+      // prevent the Copied Image URL from being pasted along with the uploaded image URL.
+      event.stopPropagation();
+      event.preventDefault();
     }
 
     function getBuilder(filename, filedata, mime, boundary) {
@@ -339,7 +377,7 @@
 
         if (xhr.responseText) {
           try {
-            serverResponse = jQuery.parseJSON(xhr.responseText);
+            serverResponse = JSON.parse(xhr.responseText);
           }
           catch (e) {
             serverResponse = xhr.responseText;
@@ -360,7 +398,7 @@
 
         // Pass any errors to the error option
         if (xhr.status < 200 || xhr.status > 299) {
-          on_error(xhr.statusText, xhr.status);
+          on_error(xhr.status, serverResponse);
         }
       };
 
@@ -378,7 +416,7 @@
       if (opts.allowedfiletypes.push && opts.allowedfiletypes.length) {
         for(var fileIndex = files.length;fileIndex--;) {
           if(!files[fileIndex].type || $.inArray(files[fileIndex].type, opts.allowedfiletypes) < 0) {
-            opts.error(errors[3], files[fileIndex]);
+            opts.error(errors[3], null, files[fileIndex], fileIndex);
             return false;
           }
         }
@@ -436,11 +474,11 @@
               return;
             }
             var reader = new FileReader(),
-                max_file_size = 1048576 * opts.maxfilesize;
+                max_file_size = 1048576 * opts.max_file_upload_size;
 
             reader.index = fileIndex;
             if (files[fileIndex].size > max_file_size) {
-              opts.error(errors[2], files[fileIndex], fileIndex);
+              opts.error(errors[2], null, files[fileIndex], fileIndex);
               // Remove from queue
               processingQueue.forEach(function(value, key) {
                 if (value === fileIndex) {
@@ -528,8 +566,8 @@
           return result;
         }
 
-        function on_error(status_text, status) {
-          opts.error(status_text, file, fileIndex, status);
+        function on_error(status_code, response) {
+          opts.error(status_code, response, file, fileIndex);
         }
 
         var fileName,
@@ -544,7 +582,7 @@
                            index: e.target.index };
 
         do_xhr(fileName, fileData, file.type, extra_opts, "", finished_callback, on_error);
-
+        opts.uploadStarted(index, file, files_count);
       };
 
       // Initiate the processing loop

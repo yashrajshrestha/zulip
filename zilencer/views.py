@@ -1,136 +1,262 @@
-from __future__ import absolute_import
+from typing import Any, Dict, List, Optional, Union
+import datetime
+import logging
 
-from django.utils.translation import ugettext as _
-from django.http import HttpResponse, HttpRequest
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email, URLValidator
+from django.db import IntegrityError, transaction
+from django.http import HttpRequest, HttpResponse
+from django.utils import timezone
+from django.utils.timezone import utc as timezone_utc
+from django.utils.translation import ugettext as _, ugettext as err_
 from django.views.decorators.csrf import csrf_exempt
-from django.contrib.auth.views import login as django_login_page
-from django.http import HttpResponseRedirect
 
-from zilencer.models import Deployment
+from analytics.lib.counts import COUNT_STATS
+from zerver.decorator import require_post, InvalidZulipServerKeyError
+from zerver.lib.exceptions import JsonableError
+from zerver.lib.push_notifications import send_android_push_notification, \
+    send_apple_push_notification
+from zerver.lib.request import REQ, has_request_variables
+from zerver.lib.response import json_error, json_success
+from zerver.lib.validator import check_int, check_string, \
+    check_capped_string, check_string_fixed_length, check_float, check_none_or, \
+    check_dict_only, check_list, check_bool
+from zerver.models import UserProfile
+from zerver.views.push_notifications import validate_token
+from zilencer.models import RemotePushDeviceToken, RemoteZulipServer, \
+    RemoteRealmCount, RemoteInstallationCount, RemoteRealmAuditLog
 
-from zerver.decorator import has_request_variables, REQ
-from zerver.lib.actions import internal_send_message
-from zerver.lib.redis_utils import get_redis_client
-from zerver.lib.response import json_success, json_error, json_response
-from zerver.lib.validator import check_dict
-from zerver.models import get_realm, get_user_profile_by_email, resolve_email_to_domain, \
-        UserProfile, Realm
-from .error_notify import notify_server_error, notify_browser_error
+def validate_entity(entity: Union[UserProfile, RemoteZulipServer]) -> RemoteZulipServer:
+    if not isinstance(entity, RemoteZulipServer):
+        raise JsonableError(err_("Must validate with valid Zulip server API key"))
+    return entity
 
-import time
+def validate_bouncer_token_request(entity: Union[UserProfile, RemoteZulipServer],
+                                   token: bytes, kind: int) -> RemoteZulipServer:
+    if kind not in [RemotePushDeviceToken.APNS, RemotePushDeviceToken.GCM]:
+        raise JsonableError(err_("Invalid token type"))
+    server = validate_entity(entity)
+    validate_token(token, kind)
+    return server
 
-from six import text_type
-from typing import Dict, Optional, Any
-
-client = get_redis_client()
-
-def has_enough_time_expired_since_last_message(sender_email, min_delay):
-    # type: (text_type, float) -> bool
-    # This function returns a boolean, but it also has the side effect
-    # of noting that a new message was received.
-    key = 'zilencer:feedback:%s' % (sender_email,)
-    t = int(time.time())
-    last_time = client.getset(key, t)
-    if last_time is None:
-        return True
-    delay = t - int(last_time)
-    return delay > min_delay
-
-def get_ticket_number():
-    # type: () -> int
-    fn = '/var/tmp/.feedback-bot-ticket-number'
+@csrf_exempt
+@require_post
+@has_request_variables
+def register_remote_server(
+        request: HttpRequest,
+        zulip_org_id: str=REQ(str_validator=check_string_fixed_length(RemoteZulipServer.UUID_LENGTH)),
+        zulip_org_key: str=REQ(str_validator=check_string_fixed_length(RemoteZulipServer.API_KEY_LENGTH)),
+        hostname: str=REQ(str_validator=check_capped_string(RemoteZulipServer.HOSTNAME_MAX_LENGTH)),
+        contact_email: str=REQ(str_validator=check_string),
+        new_org_key: Optional[str]=REQ(str_validator=check_string_fixed_length(
+            RemoteZulipServer.API_KEY_LENGTH), default=None),
+) -> HttpResponse:
+    # REQ validated the the field lengths, but we still need to
+    # validate the format of these fields.
     try:
-        ticket_number = int(open(fn).read()) + 1
-    except:
-        ticket_number = 1
-    open(fn, 'w').write('%d' % (ticket_number,))
-    return ticket_number
+        # TODO: Ideally we'd not abuse the URL validator this way
+        url_validator = URLValidator()
+        url_validator('http://' + hostname)
+    except ValidationError:
+        raise JsonableError(_('%s is not a valid hostname') % (hostname,))
+
+    try:
+        validate_email(contact_email)
+    except ValidationError as e:
+        raise JsonableError(e.message)
+
+    remote_server, created = RemoteZulipServer.objects.get_or_create(
+        uuid=zulip_org_id,
+        defaults={'hostname': hostname, 'contact_email': contact_email,
+                  'api_key': zulip_org_key})
+
+    if not created:
+        if remote_server.api_key != zulip_org_key:
+            raise InvalidZulipServerKeyError(zulip_org_id)
+        else:
+            remote_server.hostname = hostname
+            remote_server.contact_email = contact_email
+            if new_org_key is not None:
+                remote_server.api_key = new_org_key
+            remote_server.save()
+
+    return json_success({'created': created})
 
 @has_request_variables
-def submit_feedback(request, deployment, message=REQ(validator=check_dict([]))):
-    # type: (HttpRequest, Deployment, Dict[str, text_type]) -> HttpResponse
-    domainish = message["sender_domain"]
-    if get_realm("zulip.com") not in deployment.realms.all():
-        domainish += u" via " + deployment.name
-    subject = "%s" % (message["sender_email"],)
+def register_remote_push_device(request: HttpRequest, entity: Union[UserProfile, RemoteZulipServer],
+                                user_id: int=REQ(), token: bytes=REQ(),
+                                token_kind: int=REQ(validator=check_int),
+                                ios_app_id: Optional[str]=None) -> HttpResponse:
+    server = validate_bouncer_token_request(entity, token, token_kind)
 
-    if len(subject) > 60:
-        subject = subject[:57].rstrip() + "..."
-
-    content = u''
-    sender_email = message['sender_email']
-
-    # We generate ticket numbers if it's been more than a few minutes
-    # since their last message.  This avoids some noise when people use
-    # enter-send.
-    need_ticket = has_enough_time_expired_since_last_message(sender_email, 180)
-
-    if need_ticket:
-        ticket_number = get_ticket_number()
-        content += '\n~~~'
-        content += '\nticket Z%03d (@support please ack)' % (ticket_number,)
-        content += '\nsender: %s' % (message['sender_full_name'],)
-        content += '\nemail: %s' % (sender_email,)
-        if 'sender_domain' in message:
-            content += '\nrealm: %s' % (message['sender_domain'],)
-        content += '\n~~~'
-        content += '\n\n'
-
-    content += message['content']
-
-    internal_send_message("feedback@zulip.com", "stream", "support", subject, content)
-
-    return HttpResponse(message['sender_email'])
-
-@has_request_variables
-def report_error(request, deployment, type=REQ(), report=REQ(validator=check_dict([]))):
-    # type: (HttpRequest, Deployment, text_type, Dict[str, Any]) -> HttpResponse
-    return do_report_error(deployment.name, type, report)
-
-def do_report_error(deployment_name, type, report):
-    # type: (text_type, text_type, Dict[str, Any]) -> HttpResponse
-    report['deployment'] = deployment_name
-    if type == 'browser':
-        notify_browser_error(report)
-    elif type == 'server':
-        notify_server_error(report)
-    else:
-        return json_error(_("Invalid type parameter"))
-    return json_success()
-
-def realm_for_email(email):
-    # type: (str) -> Optional[Realm]
     try:
-        user = get_user_profile_by_email(email)
-        return user.realm
-    except UserProfile.DoesNotExist:
+        with transaction.atomic():
+            RemotePushDeviceToken.objects.create(
+                user_id=user_id,
+                server=server,
+                kind=token_kind,
+                token=token,
+                ios_app_id=ios_app_id,
+                # last_updated is to be renamed to date_created.
+                last_updated=timezone.now())
+    except IntegrityError:
         pass
 
-    return get_realm(resolve_email_to_domain(email))
+    return json_success()
 
-# Requests made to this endpoint are UNAUTHENTICATED
-@csrf_exempt
 @has_request_variables
-def lookup_endpoints_for_user(request, email=REQ()):
-    # type: (HttpRequest, str) -> HttpResponse
-    try:
-        return json_response(realm_for_email(email).deployment.endpoints)
-    except AttributeError:
-        return json_error(_("Cannot determine endpoint for user."), status=404)
+def unregister_remote_push_device(request: HttpRequest, entity: Union[UserProfile, RemoteZulipServer],
+                                  token: bytes=REQ(),
+                                  token_kind: int=REQ(validator=check_int),
+                                  user_id: int=REQ(),
+                                  ios_app_id: Optional[str]=None) -> HttpResponse:
+    server = validate_bouncer_token_request(entity, token, token_kind)
+    deleted = RemotePushDeviceToken.objects.filter(token=token,
+                                                   kind=token_kind,
+                                                   user_id=user_id,
+                                                   server=server).delete()
+    if deleted[0] == 0:
+        return json_error(err_("Token does not exist"))
 
-def account_deployment_dispatch(request, **kwargs):
-    # type: (HttpRequest, **Any) -> HttpResponse
-    sso_unknown_email = False
-    if request.method == 'POST':
-        email = request.POST['username']
-        realm = realm_for_email(email)
+    return json_success()
+
+@has_request_variables
+def remote_server_notify_push(request: HttpRequest, entity: Union[UserProfile, RemoteZulipServer],
+                              payload: Dict[str, Any]=REQ(argument_type='body')) -> HttpResponse:
+    server = validate_entity(entity)
+
+    user_id = payload['user_id']
+    gcm_payload = payload['gcm_payload']
+    apns_payload = payload['apns_payload']
+    gcm_options = payload.get('gcm_options', {})
+
+    android_devices = list(RemotePushDeviceToken.objects.filter(
+        user_id=user_id,
+        kind=RemotePushDeviceToken.GCM,
+        server=server
+    ))
+
+    apple_devices = list(RemotePushDeviceToken.objects.filter(
+        user_id=user_id,
+        kind=RemotePushDeviceToken.APNS,
+        server=server
+    ))
+
+    if android_devices:
+        send_android_push_notification(android_devices, gcm_payload, gcm_options, remote=True)
+
+    if apple_devices:
+        send_apple_push_notification(user_id, apple_devices, apns_payload, remote=True)
+
+    return json_success()
+
+def validate_incoming_table_data(server: RemoteZulipServer, model: Any,
+                                 rows: List[Dict[str, Any]], is_count_stat: bool=False) -> None:
+    last_id = get_last_id_from_server(server, model)
+    for row in rows:
+        if is_count_stat and row['property'] not in COUNT_STATS:
+            raise JsonableError(_("Invalid property %s") % (row['property'],))
+        if row['id'] <= last_id:
+            raise JsonableError(_("Data is out of order."))
+        last_id = row['id']
+
+def batch_create_table_data(server: RemoteZulipServer, model: Any,
+                            row_objects: Union[List[RemoteRealmCount],
+                                               List[RemoteInstallationCount]]) -> None:
+    BATCH_SIZE = 1000
+    while len(row_objects) > 0:
         try:
-            return HttpResponseRedirect(realm.deployment.base_site_url)
-        except AttributeError:
-            # No deployment found for this user/email
-            sso_unknown_email = True
+            model.objects.bulk_create(row_objects[:BATCH_SIZE])
+        except IntegrityError:
+            logging.warning("Invalid data saving %s for server %s/%s" % (
+                model._meta.db_table, server.hostname, server.uuid))
+            raise JsonableError(_("Invalid data."))
+        row_objects = row_objects[BATCH_SIZE:]
 
-    template_response = django_login_page(request, **kwargs)
-    template_response.context_data['desktop_sso_dispatch'] = True
-    template_response.context_data['desktop_sso_unknown_email'] = sso_unknown_email
-    return template_response
+@has_request_variables
+def remote_server_post_analytics(request: HttpRequest,
+                                 entity: Union[UserProfile, RemoteZulipServer],
+                                 realm_counts: List[Dict[str, Any]]=REQ(
+                                     validator=check_list(check_dict_only([
+                                         ('property', check_string),
+                                         ('realm', check_int),
+                                         ('id', check_int),
+                                         ('end_time', check_float),
+                                         ('subgroup', check_none_or(check_string)),
+                                         ('value', check_int),
+                                     ]))),
+                                 installation_counts: List[Dict[str, Any]]=REQ(
+                                     validator=check_list(check_dict_only([
+                                         ('property', check_string),
+                                         ('id', check_int),
+                                         ('end_time', check_float),
+                                         ('subgroup', check_none_or(check_string)),
+                                         ('value', check_int),
+                                     ]))),
+                                 realmauditlog_rows: Optional[List[Dict[str, Any]]]=REQ(
+                                     validator=check_list(check_dict_only([
+                                         ('id', check_int),
+                                         ('realm', check_int),
+                                         ('event_time', check_float),
+                                         ('backfilled', check_bool),
+                                         ('extra_data', check_none_or(check_string)),
+                                         ('event_type', check_int),
+                                     ])), default=None)) -> HttpResponse:
+    server = validate_entity(entity)
+
+    validate_incoming_table_data(server, RemoteRealmCount, realm_counts, True)
+    validate_incoming_table_data(server, RemoteInstallationCount, installation_counts, True)
+    if realmauditlog_rows is not None:
+        validate_incoming_table_data(server, RemoteRealmAuditLog, realmauditlog_rows)
+
+    row_objects = [RemoteRealmCount(
+        property=row['property'],
+        realm_id=row['realm'],
+        remote_id=row['id'],
+        server=server,
+        end_time=datetime.datetime.fromtimestamp(row['end_time'], tz=timezone_utc),
+        subgroup=row['subgroup'],
+        value=row['value']) for row in realm_counts]
+    batch_create_table_data(server, RemoteRealmCount, row_objects)
+
+    row_objects = [RemoteInstallationCount(
+        property=row['property'],
+        remote_id=row['id'],
+        server=server,
+        end_time=datetime.datetime.fromtimestamp(row['end_time'], tz=timezone_utc),
+        subgroup=row['subgroup'],
+        value=row['value']) for row in installation_counts]
+    batch_create_table_data(server, RemoteInstallationCount, row_objects)
+
+    if realmauditlog_rows is not None:
+        row_objects = [RemoteRealmAuditLog(
+            realm_id=row['realm'],
+            remote_id=row['id'],
+            server=server,
+            event_time=datetime.datetime.fromtimestamp(row['event_time'], tz=timezone_utc),
+            backfilled=row['backfilled'],
+            extra_data=row['extra_data'],
+            event_type=row['event_type']) for row in realmauditlog_rows]
+        batch_create_table_data(server, RemoteRealmAuditLog, row_objects)
+
+    return json_success()
+
+def get_last_id_from_server(server: RemoteZulipServer, model: Any) -> int:
+    last_count = model.objects.filter(server=server).order_by("remote_id").last()
+    if last_count is not None:
+        return last_count.remote_id
+    return 0
+
+@has_request_variables
+def remote_server_check_analytics(request: HttpRequest,
+                                  entity: Union[UserProfile, RemoteZulipServer]) -> HttpResponse:
+    server = validate_entity(entity)
+
+    result = {
+        'last_realm_count_id': get_last_id_from_server(server, RemoteRealmCount),
+        'last_installation_count_id': get_last_id_from_server(
+            server, RemoteInstallationCount),
+        'last_realmauditlog_id': get_last_id_from_server(
+            server, RemoteRealmAuditLog),
+    }
+    return json_success(result)

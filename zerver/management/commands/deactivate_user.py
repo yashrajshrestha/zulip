@@ -1,21 +1,15 @@
-from __future__ import absolute_import
-from __future__ import print_function
-
+from argparse import ArgumentParser
 from typing import Any
 
-from argparse import ArgumentParser
-from optparse import make_option
+from zerver.lib.actions import do_deactivate_user
+from zerver.lib.management import ZulipBaseCommand, CommandError
+from zerver.lib.sessions import user_sessions
+from zerver.models import UserProfile
 
-from django.core.management.base import BaseCommand
-
-from zerver.lib.actions import do_deactivate_user, user_sessions
-from zerver.models import get_user_profile_by_email, UserProfile
-
-class Command(BaseCommand):
+class Command(ZulipBaseCommand):
     help = "Deactivate a user, including forcibly logging them out."
 
-    def add_arguments(self, parser):
-        # type: (ArgumentParser) -> None
+    def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument('-f', '--for-real',
                             dest='for_real',
                             action='store_true',
@@ -23,28 +17,28 @@ class Command(BaseCommand):
                             help="Actually deactivate the user. Default is a dry run.")
         parser.add_argument('email', metavar='<email>', type=str,
                             help='email of user to deactivate')
+        self.add_realm_args(parser)
 
-    def handle(self, *args, **options):
-        # type: (*Any, **Any) -> None
-        user_profile = get_user_profile_by_email(options['email'])
+    def handle(self, *args: Any, **options: Any) -> None:
+        realm = self.get_realm(options)
+        user_profile = self.get_user(options['email'], realm)
 
         print("Deactivating %s (%s) - %s" % (user_profile.full_name,
                                              user_profile.email,
-                                             user_profile.realm.domain))
+                                             user_profile.realm.string_id))
         print("%s has the following active sessions:" % (user_profile.email,))
         for session in user_sessions(user_profile):
             print(session.expire_date, session.get_decoded())
         print("")
         print("%s has %s active bots that will also be deactivated." % (
-                user_profile.email,
-                UserProfile.objects.filter(
-                    is_bot=True, is_active=True, bot_owner=user_profile
-                ).count()
-            ))
+            user_profile.email,
+            UserProfile.objects.filter(
+                is_bot=True, is_active=True, bot_owner=user_profile
+            ).count()
+        ))
 
         if not options["for_real"]:
-            print("This was a dry run. Pass -f to actually deactivate.")
-            exit(1)
+            raise CommandError("This was a dry run. Pass -f to actually deactivate.")
 
         do_deactivate_user(user_profile)
         print("Sessions deleted, user deactivated.")

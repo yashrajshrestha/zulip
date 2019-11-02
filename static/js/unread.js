@@ -1,108 +1,525 @@
-// See http://zulip.readthedocs.io/en/latest/pointer.html for notes on
+var Dict = require('./dict').Dict;
+
+// See https://zulip.readthedocs.io/en/latest/subsystems/pointer.html for notes on
 // how this system is designed.
 
-var unread = (function () {
-
-var exports = {};
-
-var unread_mentioned = new Dict();
-var unread_topics = new Dict({fold_case: true});
-var unread_privates = new Dict();
 exports.suppress_unread_counts = true;
+exports.set_suppress_unread_counts = function (value) {
+    exports.suppress_unread_counts = value;
+};
 exports.messages_read_in_narrow = false;
+exports.set_messages_read_in_narrow = function (value) {
+    exports.messages_read_in_narrow = value;
+};
+
+function make_id_set() {
+    /* This is just a basic set class where
+       elements should be numeric ids.
+    */
+
+    var self = {};
+    var ids = new Dict();
+
+    self.clear = function () {
+        ids.clear();
+    };
+
+    self.add = function (id) {
+        ids.set(id, true);
+    };
+
+    self.has = function (id) {
+        return ids.has(id);
+    };
+
+    self.add_many = function (id_list) {
+        _.each(id_list, function (id) {
+            ids.set(id, true);
+        });
+    };
+
+    self.del = function (id) {
+        ids.del(id);
+    };
+
+    self.count = function () {
+        return ids.num_items();
+    };
+
+    self.members = function () {
+        return ids.keys();
+    };
+
+    self.max = function () {
+        return _.max(ids.keys());
+    };
+
+    self.is_empty = function () {
+        return ids.is_empty();
+    };
+
+    return self;
+}
+
+var unread_messages = make_id_set();
+
+function make_bucketer(options) {
+    var self = {};
+
+    var key_to_bucket = new Dict({fold_case: options.fold_case});
+    var reverse_lookup = new Dict();
+
+    self.clear = function () {
+        key_to_bucket.clear();
+        reverse_lookup.clear();
+    };
+
+    self.add = function (opts) {
+        var bucket_key = opts.bucket_key;
+        var item_id = opts.item_id;
+        var add_callback = opts.add_callback;
+
+        var bucket = key_to_bucket.get(bucket_key);
+        if (!bucket) {
+            bucket = options.make_bucket();
+            key_to_bucket.set(bucket_key, bucket);
+        }
+        if (add_callback) {
+            add_callback(bucket, item_id);
+        } else {
+            bucket.add(item_id);
+        }
+        reverse_lookup.set(item_id, bucket);
+    };
+
+    self.del = function (item_id) {
+        var bucket = reverse_lookup.get(item_id);
+        if (bucket) {
+            bucket.del(item_id);
+            reverse_lookup.del(item_id);
+        }
+    };
+
+    self.get_bucket = function (bucket_key) {
+        return key_to_bucket.get(bucket_key);
+    };
+
+    self.each = function (callback) {
+        key_to_bucket.each(callback);
+    };
+
+    self.keys = function () {
+        return key_to_bucket.keys();
+    };
+
+    return self;
+}
+
+exports.unread_pm_counter = (function () {
+    var self = {};
+
+    var bucketer = make_bucketer({
+        fold_case: false,
+        make_bucket: make_id_set,
+    });
+
+    self.clear = function () {
+        bucketer.clear();
+    };
+
+    self.set_pms = function (pms) {
+        _.each(pms, function (obj) {
+            var user_ids_string = obj.sender_id.toString();
+            self.set_message_ids(user_ids_string, obj.unread_message_ids);
+        });
+    };
+
+    self.set_huddles = function (huddles) {
+        _.each(huddles, function (obj) {
+            var user_ids_string = people.pm_lookup_key(obj.user_ids_string);
+            self.set_message_ids(user_ids_string, obj.unread_message_ids);
+        });
+    };
+
+    self.set_message_ids = function (user_ids_string, unread_message_ids) {
+        _.each(unread_message_ids, function (msg_id) {
+            bucketer.add({
+                bucket_key: user_ids_string,
+                item_id: msg_id,
+            });
+        });
+    };
+
+    self.add = function (message) {
+        var user_ids_string = people.pm_reply_user_string(message);
+        if (user_ids_string) {
+            bucketer.add({
+                bucket_key: user_ids_string,
+                item_id: message.id,
+            });
+        }
+    };
+
+    self.del = function (message_id) {
+        bucketer.del(message_id);
+    };
+
+    self.get_counts = function () {
+        var pm_dict = new Dict(); // Hash by user_ids_string -> count
+        var total_count = 0;
+        bucketer.each(function (id_set, user_ids_string) {
+            var count = id_set.count();
+            pm_dict.set(user_ids_string, count);
+            total_count += count;
+        });
+        return {
+            total_count: total_count,
+            pm_dict: pm_dict,
+        };
+    };
+
+    self.num_unread = function (user_ids_string) {
+        if (!user_ids_string) {
+            return 0;
+        }
+
+        var bucket = bucketer.get_bucket(user_ids_string);
+
+        if (!bucket) {
+            return 0;
+        }
+        return bucket.count();
+    };
+
+    self.get_msg_ids = function () {
+        var lists = [];
+
+        bucketer.each(function (id_set) {
+            var members = id_set.members();
+            lists.push(members);
+        });
+
+        var ids = [].concat.apply([], lists);
+
+        return util.sorted_ids(ids);
+    };
+
+    self.get_msg_ids_for_person = function (user_ids_string) {
+        if (!user_ids_string) {
+            return [];
+        }
+
+        var bucket = bucketer.get_bucket(user_ids_string);
+
+        if (!bucket) {
+            return [];
+        }
+
+        var ids = bucket.members();
+        return util.sorted_ids(ids);
+    };
+
+    return self;
+}());
+
+function make_per_stream_bucketer() {
+    return make_bucketer({
+        fold_case: true, // bucket keys are topics
+        make_bucket: make_id_set,
+    });
+}
+
+exports.unread_topic_counter = (function () {
+    var self = {};
+
+    var bucketer = make_bucketer({
+        fold_case: false, // bucket keys are stream_ids
+        make_bucket: make_per_stream_bucketer,
+    });
+
+    self.clear = function () {
+        bucketer.clear();
+    };
+
+
+    self.set_streams = function (objs) {
+        _.each(objs, function (obj) {
+            var stream_id = obj.stream_id;
+            var topic = obj.topic;
+            var unread_message_ids = obj.unread_message_ids;
+
+            _.each(unread_message_ids, function (msg_id) {
+                self.add(stream_id, topic, msg_id);
+            });
+        });
+    };
+
+    self.add = function (stream_id, topic, msg_id) {
+        bucketer.add({
+            bucket_key: stream_id,
+            item_id: msg_id,
+            add_callback: function (per_stream_bucketer) {
+                per_stream_bucketer.add({
+                    bucket_key: topic,
+                    item_id: msg_id,
+                });
+            },
+        });
+    };
+
+    self.del = function (msg_id) {
+        bucketer.del(msg_id);
+    };
+
+    function str_dict() {
+        // Use this when keys are topics
+        return new Dict({fold_case: true});
+    }
+
+    function num_dict() {
+        // Use this for stream ids.
+        return new Dict();
+    }
+
+    self.get_counts = function () {
+        var res = {};
+        res.stream_unread_messages = 0;
+        res.stream_count = num_dict();  // hash by stream_id -> count
+        res.topic_count = num_dict(); // hash of hashes (stream_id, then topic -> count)
+        bucketer.each(function (per_stream_bucketer, stream_id) {
+
+            // We track unread counts for streams that may be currently
+            // unsubscribed.  Since users may re-subscribe, we don't
+            // completely throw away the data.  But we do ignore it here,
+            // so that callers have a view of the **current** world.
+            var sub = stream_data.get_sub_by_id(stream_id);
+            if (!sub || !stream_data.is_subscribed(sub.name)) {
+                return;
+            }
+
+            res.topic_count.set(stream_id, str_dict());
+            var stream_count = 0;
+            per_stream_bucketer.each(function (msgs, topic) {
+                var topic_count = msgs.count();
+                res.topic_count.get(stream_id).set(topic, topic_count);
+                if (!muting.is_topic_muted(stream_id, topic)) {
+                    stream_count += topic_count;
+                }
+            });
+            res.stream_count.set(stream_id, stream_count);
+            if (!stream_data.is_muted(stream_id)) {
+                res.stream_unread_messages += stream_count;
+            }
+
+        });
+
+        return res;
+    };
+
+    self.get_missing_topics = function (opts) {
+        var stream_id = opts.stream_id;
+        var topic_dict = opts.topic_dict;
+
+        var per_stream_bucketer = bucketer.get_bucket(stream_id);
+        if (!per_stream_bucketer) {
+            return [];
+        }
+
+        var topic_names = per_stream_bucketer.keys();
+
+        topic_names = _.reject(topic_names, function (topic_name) {
+            return topic_dict.has(topic_name);
+        });
+
+        var result = _.map(topic_names, function (topic_name) {
+            var msgs = per_stream_bucketer.get_bucket(topic_name);
+
+            return {
+                pretty_name: topic_name,
+                message_id: msgs.max(),
+            };
+        });
+
+        return result;
+    };
+
+    self.get_stream_count = function (stream_id) {
+        var stream_count = 0;
+
+        var per_stream_bucketer = bucketer.get_bucket(stream_id);
+
+        if (!per_stream_bucketer) {
+            return 0;
+        }
+
+        var sub = stream_data.get_sub_by_id(stream_id);
+        per_stream_bucketer.each(function (msgs, topic) {
+            if (sub && !muting.is_topic_muted(stream_id, topic)) {
+                stream_count += msgs.count();
+            }
+        });
+
+        return stream_count;
+    };
+
+    self.get = function (stream_id, topic) {
+        var per_stream_bucketer = bucketer.get_bucket(stream_id);
+        if (!per_stream_bucketer) {
+            return 0;
+        }
+
+        var topic_bucket = per_stream_bucketer.get_bucket(topic);
+        if (!topic_bucket) {
+            return 0;
+        }
+
+        return topic_bucket.count();
+    };
+
+    self.get_msg_ids_for_stream = function (stream_id) {
+        var per_stream_bucketer = bucketer.get_bucket(stream_id);
+
+        if (!per_stream_bucketer) {
+            return [];
+        }
+
+        var topic_lists = [];
+        var sub = stream_data.get_sub_by_id(stream_id);
+        per_stream_bucketer.each(function (msgs, topic) {
+            if (sub && !muting.is_topic_muted(stream_id, topic)) {
+                topic_lists.push(msgs.members());
+            }
+        });
+
+        var ids = [].concat.apply([], topic_lists);
+
+        return util.sorted_ids(ids);
+    };
+
+    self.get_msg_ids_for_topic = function (stream_id, topic) {
+        var per_stream_bucketer = bucketer.get_bucket(stream_id);
+        if (!per_stream_bucketer) {
+            return [];
+        }
+
+        var topic_bucket = per_stream_bucketer.get_bucket(topic);
+        if (!topic_bucket) {
+            return [];
+        }
+
+        var ids = topic_bucket.members();
+        return util.sorted_ids(ids);
+    };
+
+
+    self.topic_has_any_unread = function (stream_id, topic) {
+        var per_stream_bucketer = bucketer.get_bucket(stream_id);
+
+        if (!per_stream_bucketer) {
+            return false;
+        }
+
+        var id_set = per_stream_bucketer.get_bucket(topic);
+        if (!id_set) {
+            return false;
+        }
+
+        return !id_set.is_empty();
+    };
+
+    return self;
+}());
+
+exports.unread_mentions_counter = make_id_set();
 
 exports.message_unread = function (message) {
     if (message === undefined) {
         return false;
     }
-    return message.flags === undefined ||
-           message.flags.indexOf('read') === -1;
+    return message.unread;
+};
+
+exports.get_unread_message_ids = function (message_ids) {
+    return _.filter(message_ids, unread_messages.has);
+};
+
+exports.get_unread_messages = function (messages) {
+    return _.filter(messages, function (message) {
+        return unread_messages.has(message.id);
+    });
 };
 
 exports.update_unread_topics = function (msg, event) {
-    var canon_stream = stream_data.canonicalized_name(msg.stream);
-    var canon_subject = stream_data.canonicalized_name(msg.subject);
+    var new_topic = util.get_edit_event_topic(event);
 
-    if (event.subject !== undefined &&
-        unread_topics.has(canon_stream) &&
-        unread_topics.get(canon_stream).has(canon_subject) &&
-        unread_topics.get(canon_stream).get(canon_subject).get(msg.id)) {
-        var new_canon_subject = stream_data.canonicalized_name(event.subject);
-        // Move the unread subject count to the new subject
-        unread_topics.get(canon_stream).get(canon_subject).del(msg.id);
-        if (unread_topics.get(canon_stream).get(canon_subject).num_items() === 0) {
-            unread_topics.get(canon_stream).del(canon_subject);
-        }
-        unread_topics.get(canon_stream).setdefault(new_canon_subject, new Dict());
-        unread_topics.get(canon_stream).get(new_canon_subject).set(msg.id, true);
+    if (new_topic === undefined) {
+        return;
     }
+
+    if (!unread_messages.has(msg.id)) {
+        return;
+    }
+
+    exports.unread_topic_counter.del(
+        msg.id
+    );
+
+    exports.unread_topic_counter.add(
+        msg.stream_id,
+        new_topic,
+        msg.id
+    );
 };
 
 exports.process_loaded_messages = function (messages) {
     _.each(messages, function (message) {
-        var unread = exports.message_unread(message);
-        if (!unread) {
+        if (!message.unread) {
             return;
         }
 
+        unread_messages.add(message.id);
+
         if (message.type === 'private') {
-            unread_privates.setdefault(message.reply_to, new Dict());
-            unread_privates.get(message.reply_to).set(message.id, true);
+            exports.unread_pm_counter.add(message);
         }
 
         if (message.type === 'stream') {
-            var canon_stream = stream_data.canonicalized_name(message.stream);
-            var canon_subject = stream_data.canonicalized_name(message.subject);
-
-            unread_topics.setdefault(canon_stream, new Dict());
-            unread_topics.get(canon_stream).setdefault(canon_subject, new Dict());
-            unread_topics.get(canon_stream).get(canon_subject).set(message.id, true);
+            exports.unread_topic_counter.add(
+                message.stream_id,
+                util.get_message_topic(message),
+                message.id
+            );
         }
 
-        if (message.mentioned) {
-            unread_mentioned.set(message.id, true);
+        const is_unmuted_mention = message.type === 'stream' && message.mentioned &&
+                                   !muting.is_topic_muted(message.stream_id,
+                                                          util.get_message_topic(message));
+        if (message.mentioned_me_directly || is_unmuted_mention) {
+            exports.unread_mentions_counter.add(message.id);
         }
     });
 };
 
-exports.process_read_message = function (message) {
+exports.mark_as_read = function (message_id) {
+    // We don't need to check anything about the message, since all
+    // the following methods are cheap and work fine even if message_id
+    // was never set to unread.
+    exports.unread_pm_counter.del(message_id);
+    exports.unread_topic_counter.del(message_id);
+    exports.unread_mentions_counter.del(message_id);
+    unread_messages.del(message_id);
 
-    if (message.type === 'private') {
-        var dict = unread_privates.get(message.reply_to);
-        if (dict) {
-            dict.del(message.id);
-        }
+    var message = message_store.get(message_id);
+    if (message) {
+        message.unread = false;
     }
-
-    if (message.type === 'stream') {
-        var canon_stream = stream_data.canonicalized_name(message.stream);
-        var canon_subject = stream_data.canonicalized_name(message.subject);
-        var stream_dict = unread_topics.get(canon_stream);
-        if (stream_dict) {
-            var subject_dict = stream_dict.get(canon_subject);
-            if (subject_dict) {
-                subject_dict.del(message.id);
-            }
-        }
-    }
-    unread_mentioned.del(message.id);
 };
 
 exports.declare_bankruptcy = function () {
-    unread_privates = new Dict();
-    unread_topics = new Dict({fold_case: true});
-};
-
-exports.num_unread_current_messages = function () {
-    var num_unread = 0;
-
-    _.each(current_msg_list.all_messages(), function (msg) {
-        if ((msg.id > current_msg_list.selected_id()) && exports.message_unread(msg)) {
-            num_unread += 1;
-        }
-    });
-
-    return num_unread;
+    exports.unread_pm_counter.clear();
+    exports.unread_topic_counter.clear();
+    exports.unread_mentions_counter.clear();
+    unread_messages.clear();
 };
 
 exports.get_counts = function () {
@@ -112,197 +529,122 @@ exports.get_counts = function () {
     // pretty cheap, even if you don't care about all the counts, and you
     // should strive to keep it free of side effects on globals or DOM.
     res.private_message_count = 0;
-    res.home_unread_messages = 0;
-    res.mentioned_message_count = unread_mentioned.num_items();
-    res.stream_count = new Dict();  // hash by stream -> count
-    res.subject_count = new Dict(); // hash of hashes (stream, then subject -> count)
-    res.pm_count = new Dict(); // Hash by email -> count
+    res.mentioned_message_count = exports.unread_mentions_counter.count();
 
-    unread_topics.each(function (_, stream) {
-        if (! stream_data.is_subscribed(stream)) {
-            return true;
-        }
+    // This sets stream_count, topic_count, and home_unread_messages
+    var topic_res = exports.unread_topic_counter.get_counts();
+    res.home_unread_messages = topic_res.stream_unread_messages;
+    res.stream_count = topic_res.stream_count;
+    res.topic_count = topic_res.topic_count;
 
-        if (unread_topics.has(stream)) {
-            res.subject_count.set(stream, new Dict());
-            var stream_count = 0;
-            unread_topics.get(stream).each(function (msgs, subject) {
-                var subject_count = msgs.num_items();
-                res.subject_count.get(stream).set(subject, subject_count);
-                if (!muting.is_topic_muted(stream, subject)) {
-                    stream_count += subject_count;
-                }
-            });
-            res.stream_count.set(stream, stream_count);
-            if (stream_data.in_home_view(stream)) {
-                res.home_unread_messages += stream_count;
-            }
-        }
-
-    });
-
-    var pm_count = 0;
-    unread_privates.each(function (obj, index) {
-        var count = obj.num_items();
-        res.pm_count.set(index, count);
-        pm_count += count;
-    });
-    res.private_message_count = pm_count;
-    res.home_unread_messages += pm_count;
-
-    if (narrow.active()) {
-        res.unread_in_current_view = exports.num_unread_current_messages();
-    } else {
-        res.unread_in_current_view = res.home_unread_messages;
-    }
+    var pm_res = exports.unread_pm_counter.get_counts();
+    res.pm_count = pm_res.pm_dict;
+    res.private_message_count = pm_res.total_count;
+    res.home_unread_messages += pm_res.total_count;
 
     return res;
 };
 
-exports.num_unread_for_subject = function (stream, subject) {
-    var num_unread = 0;
-    if (unread_topics.has(stream) &&
-        unread_topics.get(stream).has(subject)) {
-        num_unread = unread_topics.get(stream).get(subject).num_items();
-    }
-    return num_unread;
-};
+// Saves us from calling to get_counts() when we can avoid it.
+exports.calculate_notifiable_count = function (res) {
+    var new_message_count = 0;
 
-exports.num_unread_for_person = function (email) {
-    if (!unread_privates.has(email)) {
-        return 0;
-    }
-    return unread_privates.get(email).num_items();
-};
-
-exports.update_unread_counts = function () {
-    if (exports.suppress_unread_counts) {
-        return;
-    }
-
-    // Pure computation:
-    var res = unread.get_counts();
-
-    // Side effects from here down:
-    // This updates some DOM elements directly, so try to
-    // avoid excessive calls to this.
-    stream_list.update_dom_with_unread_counts(res);
-    notifications.update_title_count(res.home_unread_messages);
-    notifications.update_pm_count(res.private_message_count);
-};
-
-exports.enable = function enable() {
-    exports.suppress_unread_counts = false;
-    exports.update_unread_counts();
-};
-
-exports.mark_all_as_read = function mark_all_as_read(cont) {
-    _.each(message_list.all.all_messages(), function (msg) {
-        msg.flags = msg.flags || [];
-        msg.flags.push('read');
-    });
-    unread.declare_bankruptcy();
-    exports.update_unread_counts();
-
-    channel.post({
-        url:      '/json/messages/flags',
-        idempotent: true,
-        data:     {messages: JSON.stringify([]),
-                   all:      true,
-                   op:       'add',
-                   flag:     'read'},
-        success:  cont});
-};
-
-// Takes a list of messages and marks them as read
-exports.mark_messages_as_read = function mark_messages_as_read (messages, options) {
-    options = options || {};
-    var processed = false;
-
-    _.each(messages, function (message) {
-        if (!unread.message_unread(message)) {
-            // Don't do anything if the message is already read.
-            return;
-        }
-        if (current_msg_list === message_list.narrowed) {
-            unread.messages_read_in_narrow = true;
-        }
-
-        if (options.from !== "server") {
-            message_flags.send_read(message);
-        }
-
-        message.flags = message.flags || [];
-        message.flags.push('read');
-        message.unread = false;
-        unread.process_read_message(message, options);
-        home_msg_list.show_message_as_read(message, options);
-        message_list.all.show_message_as_read(message, options);
-        if (message_list.narrowed) {
-            message_list.narrowed.show_message_as_read(message, options);
-        }
-        notifications.close_notification(message);
-        processed = true;
-    });
-
-    if (processed) {
-        exports.update_unread_counts();
-    }
-};
-
-exports.mark_message_as_read = function mark_message_as_read(message, options) {
-    exports.mark_messages_as_read([message], options);
-};
-
-// If we ever materially change the algorithm for this function, we
-// may need to update notifications.received_messages as well.
-exports.process_visible = function process_visible(update_cursor) {
-    if (! notifications.window_has_focus()) {
-        return;
-    }
-
-    if (feature_flags.mark_read_at_bottom) {
-        if (viewport.bottom_message_visible()) {
-            exports.mark_current_list_as_read();
-        }
+    var only_show_notifiable = page_params.desktop_icon_count_display ===
+        settings_notifications.desktop_icon_count_display_values.notifiable.code;
+    var no_notifications = page_params.desktop_icon_count_display ===
+        settings_notifications.desktop_icon_count_display_values.none.code;
+    if (only_show_notifiable) {
+        // DESKTOP_ICON_COUNT_DISPLAY_NOTIFIABLE
+        new_message_count = res.mentioned_message_count + res.private_message_count;
+    } else if (no_notifications) {
+        // DESKTOP_ICON_COUNT_DISPLAY_NONE
+        new_message_count = 0;
     } else {
-        exports.mark_messages_as_read(viewport.visible_messages(true));
+        // DESKTOP_ICON_COUNT_DISPLAY_MESSAGES
+        new_message_count = res.home_unread_messages;
     }
+    return new_message_count;
 };
 
-exports.mark_current_list_as_read = function mark_current_list_as_read(options) {
-    exports.mark_messages_as_read(current_msg_list.all_messages(), options);
+exports.get_notifiable_count = function () {
+    var res = exports.get_counts();
+    return exports.calculate_notifiable_count(res);
 };
 
-exports.mark_stream_as_read = function mark_stream_as_read(stream, cont) {
-    channel.post({
-        url:      '/json/messages/flags',
-        idempotent: true,
-        data:     {messages: JSON.stringify([]),
-                   all:      false,
-                   op:       'add',
-                   flag:     'read',
-                   stream_name: stream
-                  },
-        success:  cont});
+exports.num_unread_for_stream = function (stream_id) {
+    return exports.unread_topic_counter.get_stream_count(stream_id);
 };
 
-exports.mark_topic_as_read = function mark_topic_as_read(stream, topic, cont) {
-    channel.post({
-    url:      '/json/messages/flags',
-    idempotent: true,
-    data:     {messages: JSON.stringify([]),
-               all:      false,
-               op:       'add',
-               flag:     'read',
-               topic_name: topic,
-               stream_name: stream
-               },
-    success:  cont});
+exports.num_unread_for_topic = function (stream_id, topic_name) {
+    return exports.unread_topic_counter.get(stream_id, topic_name);
 };
 
-return exports;
-}());
-if (typeof module !== 'undefined') {
-    module.exports = unread;
-}
+exports.topic_has_any_unread = function (stream_id, topic) {
+    return exports.unread_topic_counter.topic_has_any_unread(stream_id, topic);
+};
+
+exports.num_unread_for_person = function (user_ids_string) {
+    return exports.unread_pm_counter.num_unread(user_ids_string);
+};
+
+exports.get_msg_ids_for_stream = function (stream_id) {
+    return exports.unread_topic_counter.get_msg_ids_for_stream(stream_id);
+};
+
+exports.get_msg_ids_for_topic = function (stream_id, topic_name) {
+    return exports.unread_topic_counter.get_msg_ids_for_topic(stream_id, topic_name);
+};
+
+exports.get_msg_ids_for_person = function (user_ids_string) {
+    return exports.unread_pm_counter.get_msg_ids_for_person(user_ids_string);
+};
+
+exports.get_msg_ids_for_private = function () {
+    return exports.unread_pm_counter.get_msg_ids();
+};
+
+exports.get_msg_ids_for_mentions = function () {
+    var ids = exports.unread_mentions_counter.members();
+
+    return util.sorted_ids(ids);
+};
+
+exports.get_all_msg_ids = function () {
+    var ids = unread_messages.members();
+
+    return util.sorted_ids(ids);
+};
+
+exports.get_missing_topics = function (opts) {
+    return exports.unread_topic_counter.get_missing_topics(opts);
+};
+
+exports.get_msg_ids_for_starred = function () {
+    // This is here for API consistency sake--we never
+    // have unread starred messages.  (Some day we may ironically
+    // want to make starring the same as mark-as-unread, but
+    // for now starring === reading.)
+    return [];
+};
+
+exports.initialize = function () {
+    var unread_msgs = page_params.unread_msgs;
+
+    exports.unread_pm_counter.set_huddles(unread_msgs.huddles);
+    exports.unread_pm_counter.set_pms(unread_msgs.pms);
+    exports.unread_topic_counter.set_streams(unread_msgs.streams);
+    exports.unread_mentions_counter.add_many(unread_msgs.mentions);
+
+    _.each(unread_msgs.huddles, function (obj) {
+        unread_messages.add_many(obj.unread_message_ids);
+    });
+    _.each(unread_msgs.pms, function (obj) {
+        unread_messages.add_many(obj.unread_message_ids);
+    });
+    _.each(unread_msgs.streams, function (obj) {
+        unread_messages.add_many(obj.unread_message_ids);
+    });
+    unread_messages.add_many(unread_msgs.mentions);
+};
+
+window.unread = exports;

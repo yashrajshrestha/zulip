@@ -1,16 +1,12 @@
-from __future__ import absolute_import
-
 from django.conf import settings
 
 import hashlib
 import base64
 
 from typing import Optional
-from six import text_type
 
 
-def initial_password(email):
-    # type: (text_type) -> Optional[text_type]
+def initial_password(email: str) -> Optional[str]:
     """Given an email address, returns the initial password for that account, as
        created by populate_db."""
 

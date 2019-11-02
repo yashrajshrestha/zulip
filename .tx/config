@@ -1,16 +1,33 @@
 [main]
 host = https://www.transifex.com
+lang_map = zh-Hans: zh_Hans, zh-Hant: zh_Hant
 
 [zulip.djangopo]
-source_file = static/locale/en/LC_MESSAGES/django.po
+file_filter = locale/<lang>/LC_MESSAGES/django.po
+source_file = locale/en/LC_MESSAGES/django.po
 source_lang = en
 type = PO
-file_filter = static/locale/<lang>/LC_MESSAGES/django.po
-lang_map = zh-Hans: zh_CN
 
 [zulip.translationsjson]
-source_file = static/locale/en/translations.json
+file_filter = locale/<lang>/translations.json
+source_file = locale/en/translations.json
 source_lang = en
 type = KEYVALUEJSON
-file_filter = static/locale/<lang>/translations.json
-lang_map = zh-Hans: zh-CN
+
+[zulip.mobile]
+file_filter = locale/<lang>/mobile.json
+source_file = locale/en/mobile.json
+source_lang = en
+type = KEYVALUEJSON
+
+[zulip-test.djangopo]
+file_filter = locale/<lang>/LC_MESSAGES/django.po
+source_file = locale/en/LC_MESSAGES/django.po
+source_lang = en
+type = PO
+
+[zulip-test.translationsjson]
+file_filter = locale/<lang>/translations.json
+source_file = locale/en/translations.json
+source_lang = en
+type = KEYVALUEJSON

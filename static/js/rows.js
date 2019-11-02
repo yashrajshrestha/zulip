@@ -1,7 +1,3 @@
-var rows = (function () {
-
-var exports = {};
-
 // We don't need an andSelf() here because we already know
 // that our next element is *not* a message_row, so this
 // isn't going to end up empty unless we're at the bottom or top.
@@ -18,7 +14,7 @@ exports.next_visible = function (message_row) {
     if (next_recipient_rows.length === 0) {
         return $();
     }
-    return $('.selectable_row:first', next_recipient_rows[0]);
+    return $('.selectable_row', next_recipient_rows[0]).first();
 };
 
 exports.prev_visible = function (message_row) {
@@ -34,32 +30,41 @@ exports.prev_visible = function (message_row) {
     if (prev_recipient_rows.length === 0) {
         return $();
     }
-    return $('.selectable_row:last', prev_recipient_rows[0]);
+    return $('.selectable_row', prev_recipient_rows[0]).last();
 };
 
 exports.first_visible = function () {
-    return $('.focused_table .selectable_row:first');
+    return $('.focused_table .selectable_row').first();
 };
 
 exports.last_visible = function () {
-    return $('.focused_table .selectable_row:last');
+    return $('.focused_table .selectable_row').last();
 };
 
 exports.id = function (message_row) {
-    return parseFloat(message_row.attr('zid'), 10);
+    return parseFloat(message_row.attr('zid'));
 };
 
 var valid_table_names = {
     zhome: true,
-    zfilt: true
+    zfilt: true,
 };
 
 exports.get_table = function (table_name) {
-    if (! valid_table_names.hasOwnProperty(table_name)) {
+    if (!valid_table_names.hasOwnProperty(table_name)) {
         return $();
     }
 
     return $('#' + table_name);
+};
+
+exports.get_message_id = function (elem) {
+    // Gets the message_id for elem, where elem is a DOM
+    // element inside a message.  This is typically used
+    // in click handlers for things like the reaction button.
+    var row = $(elem).closest(".message_row");
+    var message_id = exports.id(row);
+    return message_id;
 };
 
 exports.get_closest_group = function (element) {
@@ -70,7 +75,7 @@ exports.get_closest_group = function (element) {
 };
 
 exports.first_message_in_group = function (message_group) {
-    return $('div.message_row:first', message_group);
+    return $('div.message_row', message_group).first();
 };
 
 exports.get_message_recipient_row = function (message_row) {
@@ -94,11 +99,8 @@ exports.id_for_recipient_row = function (recipient_row) {
         // If we're narrowing from the FRB, take the msg id
         // directly from it
         return exports.id(recipient_row);
-    } else {
-        return exports.id(msg_row);
     }
+    return exports.id(msg_row);
 };
 
-return exports;
-
-}());
+window.rows = exports;

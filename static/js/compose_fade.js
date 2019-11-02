@@ -1,12 +1,9 @@
-var compose_fade = (function () {
-
-var exports = {};
-
 var focused_recipient;
 var normal_display = false;
 
-var fade_heuristic = feature_flags.fade_at_stream_granularity ?
-                         util.same_major_recipient : util.same_recipient;
+exports.should_fade_message =  function (message) {
+    return !util.same_recipient(focused_recipient, message);
+};
 
 exports.set_focused_recipient = function (msg_type) {
     if (msg_type === undefined) {
@@ -16,55 +13,56 @@ exports.set_focused_recipient = function (msg_type) {
     // Construct focused_recipient as a mocked up element which has all the
     // fields of a message used by util.same_recipient()
     focused_recipient = {
-        type: msg_type
+        type: msg_type,
     };
 
     if (focused_recipient.type === "stream") {
-        focused_recipient.stream = $('#stream').val();
-        focused_recipient.subject = $('#subject').val();
+        var stream_name = $('#stream_message_recipient_stream').val();
+        focused_recipient.topic = $('#stream_message_recipient_topic').val();
+        focused_recipient.stream = stream_name;
+        var sub = stream_data.get_sub(stream_name);
+        if (sub) {
+            focused_recipient.stream_id = sub.stream_id;
+        }
     } else {
         // Normalize the recipient list so it matches the one used when
         // adding the message (see message_store.add_message_metadata()).
-        focused_recipient.reply_to = util.normalize_recipients(
-                $('#private_message_recipient').val());
+        var reply_to = util.normalize_recipients(compose_state.recipient());
+        focused_recipient.reply_to = reply_to;
+        focused_recipient.to_user_ids = people.reply_to_to_user_ids_string(reply_to);
     }
 };
 
-function _display_messages_normally() {
-    rows.get_table(current_msg_list.table_name).find(".recipient_row, .message_row")
-                                               .removeClass("faded").removeClass("unfaded");
+function display_messages_normally() {
+    var table = rows.get_table(current_msg_list.table_name);
+    table.find('.recipient_row').removeClass("message-fade");
 
     normal_display = true;
     floating_recipient_bar.update();
 }
 
-function _display_users_normally() {
-    if (!feature_flags.fade_users_when_composing) {
-        return;
-    }
-    $('.user_sidebar_entry').removeClass('faded').removeClass('unfaded');
-}
-
 function change_fade_state(elt, should_fade_group) {
     if (should_fade_group) {
-        elt.removeClass("unfaded").addClass("faded");
+        elt.addClass("message-fade");
     } else {
-        elt.removeClass("faded").addClass("unfaded");
+        elt.removeClass("message-fade");
     }
 }
 
-function _fade_messages() {
-    var i, first_message, first_row;
+function fade_messages() {
+    var i;
+    var first_message;
+    var first_row;
     var should_fade_group = false;
-    var visible_groups = viewport.visible_groups(false);
+    var visible_groups = message_viewport.visible_groups(false);
 
     normal_display = false;
 
     // Update the visible messages first, before the compose box opens
-    for (i = 0; i < visible_groups.length; i++) {
+    for (i = 0; i < visible_groups.length; i += 1) {
         first_row = rows.first_message_in_group(visible_groups[i]);
         first_message = current_msg_list.get(rows.id(first_row));
-        should_fade_group = !fade_heuristic(focused_recipient, first_message);
+        should_fade_group = exports.should_fade_message(first_message);
 
         change_fade_state($(visible_groups[i]), should_fade_group);
     }
@@ -74,8 +72,8 @@ function _fade_messages() {
         var all_groups = rows.get_table(current_msg_list.table_name).find(".recipient_row");
 
         if (current_msg_list !== expected_msg_list ||
-            !compose.composing() ||
-            compose.recipient() !== expected_recipient) {
+            !compose_state.composing() ||
+            compose_state.recipient() !== expected_recipient) {
             return;
         }
 
@@ -83,65 +81,71 @@ function _fade_messages() {
 
         // Note: The below algorithm relies on the fact that all_elts is
         // sorted as it would be displayed in the message view
-        for (i = 0; i < all_groups.length; i++) {
+        for (i = 0; i < all_groups.length; i += 1) {
             var group_elt = $(all_groups[i]);
-            should_fade_group = !fade_heuristic(focused_recipient, rows.recipient_from_group(group_elt));
+            should_fade_group = exports.should_fade_message(rows.recipient_from_group(group_elt));
             change_fade_state(group_elt, should_fade_group);
         }
 
         floating_recipient_bar.update();
-    }, 0, current_msg_list, compose.recipient());
+    }, 0, current_msg_list, compose_state.recipient());
 }
 
 exports.would_receive_message = function (email) {
-    // Given the current focused_recipient, this function returns true if
-    // the user in question would definitely receive this message, false if
-    // they would definitely not receive this message, and undefined if we
-    // don't know (e.g. the recipient is a stream we're not subscribed to).
-    //
-    // Yes it's slightly weird to have three return values, but this will be
-    // helpful if we want to emphasize the '.unfaded' class later (applied
-    // to users who will definitely receive the message).
-
-    if (util.is_current_user(email)) {
-        // We never want to fade you yourself, so pretend it's true even if
-        // it's not.
-        return true;
-    }
-
     if (focused_recipient.type === 'stream') {
-        var user = people.realm_get(email);
+        var user = people.get_active_user_for_email(email);
         var sub = stream_data.get_sub(focused_recipient.stream);
-        if (user && sub && user.is_bot && !sub.invite_only) {
-            // Bots may receive messages on public streams even if they are
-            // not subscribed.
-            return undefined;
+        if (!sub || !user) {
+            // If the stream or user isn't valid, there is no risk of a mix
+            // yet, so we sort of "lie" and say they would receive a
+            // message.
+            return true;
         }
-        return stream_data.user_is_subscribed(focused_recipient.stream, email);
+
+        return stream_data.is_user_subscribed(focused_recipient.stream, user.user_id);
     }
 
     // PM, so check if the given email is in the recipients list.
     return util.is_pm_recipient(email, focused_recipient);
 };
 
-function _fade_users() {
-    if (!feature_flags.fade_users_when_composing) {
-        return;
+var user_fade_config = {
+    get_user_id: function (li) {
+        return buddy_list.get_key_from_li({li: li});
+    },
+    fade: function (li) {
+        return li.addClass('user-fade');
+    },
+    unfade: function (li) {
+        return li.removeClass('user-fade');
+    },
+};
+
+function update_user_row_when_fading(li, conf) {
+    var user_id = conf.get_user_id(li);
+    var email = people.get_person_from_user_id(user_id).email;
+    var would_receive = exports.would_receive_message(email);
+
+    if (would_receive || people.is_my_user_id(user_id)) {
+        conf.unfade(li);
+    } else {
+        conf.fade(li);
     }
-    _.forEach($('.user_sidebar_entry'), function (elt) {
-        elt = $(elt);
-        var would_receive = exports.would_receive_message(elt.attr('data-email'));
-        if (would_receive === true) {
-            elt.addClass('unfaded').removeClass('faded');
-        } else if (would_receive === false) {
-            elt.addClass('faded').removeClass('unfaded');
-        } else {
-            elt.removeClass('faded').removeClass('unfaded');
-        }
+}
+
+function display_users_normally(items, conf) {
+    _.each(items, function (li) {
+        conf.unfade(li);
     });
 }
 
-function _want_normal_display() {
+function fade_users(items, conf) {
+    _.each(items, function (li) {
+        update_user_row_when_fading(li, conf);
+    });
+}
+
+function want_normal_display() {
     // If we're not composing show a normal display.
     if (focused_recipient === undefined) {
         return true;
@@ -159,7 +163,7 @@ function _want_normal_display() {
         // the user simply hasn't started typing it yet, but disabling fading here
         // means the feature doesn't help realms where topics aren't mandatory
         // (which is most realms as of this writing).
-        if (focused_recipient.subject === "") {
+        if (focused_recipient.topic === "") {
             return true;
         }
     }
@@ -167,18 +171,17 @@ function _want_normal_display() {
     return focused_recipient.type === "private" && focused_recipient.reply_to === "";
 }
 
-function _update_faded_messages() {
-    // See also update_faded_messages(), which just wraps this with a debounce.
-    // FIXME: This fades users too now, as well as messages, so should have
-    // a better name.
-    if (_want_normal_display()) {
+function do_update_all() {
+    var user_items = buddy_list.get_items();
+
+    if (want_normal_display()) {
         if (!normal_display) {
-            _display_messages_normally();
-            _display_users_normally();
+            display_messages_normally();
+            display_users_normally(user_items, user_fade_config);
         }
     } else {
-        _fade_messages();
-        _fade_users();
+        fade_messages();
+        fade_users(user_items, user_fade_config);
     }
 }
 
@@ -186,62 +189,65 @@ function _update_faded_messages() {
 // This is for when new presence information comes in, redrawing the presence
 // list.
 exports.update_faded_users = function () {
-    if (_want_normal_display()) {
-        _display_users_normally();
+    var user_items = buddy_list.get_items();
+
+    exports.update_user_info(user_items, user_fade_config);
+};
+
+exports.update_user_info = function (items, conf) {
+    if (want_normal_display()) {
+        display_users_normally(items, conf);
     } else {
-        _fade_users();
+        fade_users(items, conf);
     }
 };
 
-// See trac #1633.  For fast typists, calls to _update_faded_messages can
-// cause typing sluggishness.
-exports.update_faded_messages = _.debounce(_update_faded_messages, 50);
+// This gets called on keyup events, hence the throttling.
+exports.update_all = _.debounce(do_update_all, 50);
 
 exports.start_compose = function (msg_type) {
     exports.set_focused_recipient(msg_type);
-    _update_faded_messages();
+    do_update_all();
 };
 
 exports.clear_compose = function () {
     focused_recipient = undefined;
-    _display_messages_normally();
-    _display_users_normally();
+    display_messages_normally();
+    exports.update_faded_users();
 };
 
 exports.update_message_list = function () {
-    if (_want_normal_display()) {
-       _display_messages_normally();
+    if (want_normal_display()) {
+        display_messages_normally();
     } else {
-        _fade_messages();
+        fade_messages();
     }
 };
 
 exports.update_rendered_message_groups = function (message_groups, get_element) {
-    if (_want_normal_display()) {
+    if (want_normal_display()) {
         return;
     }
 
-    // This loop is superficially similar to some code in _fade_messages, but an
+    // This loop is superficially similar to some code in fade_messages, but an
     // important difference here is that we look at each message individually, whereas
     // the other code takes advantage of blocks beneath recipient bars.
     _.each(message_groups, function (message_group) {
         var elt = get_element(message_group);
         var first_message = message_group.message_containers[0].msg;
-        var should_fade = !fade_heuristic(focused_recipient, first_message);
+        var should_fade = exports.should_fade_message(first_message);
         change_fade_state(elt, should_fade);
     });
 };
 
-$(function () {
-    $(document).on('peer_subscribe.zulip', function (e) {
+exports.initialize = function () {
+    $(document).on('peer_subscribe.zulip', function () {
         exports.update_faded_users();
     });
-    $(document).on('peer_unsubscribe.zulip', function (e) {
+    $(document).on('peer_unsubscribe.zulip', function () {
         exports.update_faded_users();
     });
-});
+};
 
 
-return exports;
-
-}());
+window.compose_fade = exports;

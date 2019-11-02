@@ -1,46 +1,43 @@
-from __future__ import absolute_import
-
 import logging
-from typing import Any
 
-from django.core.management.base import BaseCommand
-from django.db.utils import IntegrityError
+from argparse import ArgumentParser
+from typing import Any, List
+
+
 from django.conf import settings
 
-from zproject.backends import ZulipLDAPUserPopulator
+from zerver.lib.logging_util import log_to_file
+from zerver.lib.management import ZulipBaseCommand
 from zerver.models import UserProfile
+from zproject.backends import ZulipLDAPException, sync_user_from_ldap
 
 ## Setup ##
-
-log_format = "%(asctime)s: %(message)s"
-logging.basicConfig(format=log_format)
-
-formatter = logging.Formatter(log_format)
-file_handler = logging.FileHandler(settings.LDAP_SYNC_LOG_PATH)
-file_handler.setFormatter(formatter)
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(file_handler)
+logger = logging.getLogger('zulip.sync_ldap_user_data')
+log_to_file(logger, settings.LDAP_SYNC_LOG_PATH)
 
 # Run this on a cronjob to pick up on name changes.
-def sync_ldap_user_data():
-    # type: () -> None
+def sync_ldap_user_data(user_profiles: List[UserProfile]) -> None:
     logger.info("Starting update.")
-    backend = ZulipLDAPUserPopulator()
-    for u in UserProfile.objects.select_related().filter(is_active=True, is_bot=False).all():
+    for u in user_profiles:
         # This will save the user if relevant, and will do nothing if the user
         # does not exist.
         try:
-            if backend.populate_user(backend.django_to_ldap_username(u.email)) is not None:
-                logger.info("Updated %s." % (u.email,))
-            else:
-                logger.warning("Did not find %s in LDAP." % (u.email,))
-        except IntegrityError:
-            logger.warning("User populated did not match an existing user.")
+            sync_user_from_ldap(u, logger)
+        except ZulipLDAPException as e:
+            logger.error("Error attempting to update user %s:" % (u.email,))
+            logger.error(e)
     logger.info("Finished update.")
 
-class Command(BaseCommand):
-    def handle(self, *args, **options):
-        # type: (*Any, **Any) -> None
-        sync_ldap_user_data()
+class Command(ZulipBaseCommand):
+    def add_arguments(self, parser: ArgumentParser) -> None:
+        self.add_realm_args(parser)
+        self.add_user_list_args(parser)
+
+    def handle(self, *args: Any, **options: Any) -> None:
+        if options.get('realm_id') is not None:
+            realm = self.get_realm(options)
+            user_profiles = self.get_users(options, realm, is_bot=False,
+                                           include_deactivated=True)
+        else:
+            user_profiles = UserProfile.objects.select_related().filter(is_bot=False)
+        sync_ldap_user_data(user_profiles)

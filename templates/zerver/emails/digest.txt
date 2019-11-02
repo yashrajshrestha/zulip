@@ -1,0 +1,21 @@
+{% if hot_conversations %}
+{% for convo in hot_conversations %}{% for recipient_block in convo.first_few_messages %}{{ recipient_block.header.plain }}
+{% for sender_block in recipient_block.senders %}
+{% for message_block in sender_block.content %}{{ message_block.plain }}
+{% endfor %}{% endfor %}
+{% if convo.count > 0 %}+ {{ convo.count }} more message{{ convo.count|pluralize }} by {{ convo.participants|display_list(4) }}.{% endif %}{% endfor %}{% endfor %}{% endif %}
+
+{% if new_streams.plain %}** New streams **
+    {{ new_streams.plain|display_list(1000) }}.
+{% endif %}
+
+Click here to log in to Zulip and catch up: {{ realm_uri }}.
+
+--
+Manage email preferences:
+
+{{ realm_uri }}/#settings/notifications
+
+Unsubscribe from digest emails:
+
+{{ unsubscribe_link }}

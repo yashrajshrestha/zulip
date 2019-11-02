@@ -1,0 +1,29 @@
+{
+    "compilerOptions": {
+        /* Typescript 3.4 added the --incremental flag but its API is not
+         * currently public so ts-loader cannot use it yet.
+         * Tracking issue: https://github.com/microsoft/TypeScript/issues/29978
+         */
+        // "incremental": true,
+
+        /* Basic options */
+        "noEmit": true,
+        "target": "es5",
+        "module": "es6",
+        "esModuleInterop": true,
+        "moduleResolution": "node",
+        "sourceMap": true,
+
+        /* Strict type-checking */
+        "strict": true,
+        "strictNullChecks": false,
+        "forceConsistentCasingInFileNames": true,
+        "isolatedModules": true,
+
+        /* Additional checks */
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "noImplicitReturns": true,
+        "noFallthroughCasesInSwitch": true,
+    }
+}

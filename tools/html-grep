@@ -1,18 +1,15 @@
-#!/usr/bin/env python
-from __future__ import absolute_import
-from __future__ import print_function
+#!/usr/bin/env python3
 from lib.html_grep import grep
-import optparse
+import argparse
 import sys
 
-from six.moves import filter
-try:
-    import lister
-except ImportError as e:
-    print("ImportError: {}".format(e))
-    print("You need to run the Zulip linters inside a Zulip dev environment.")
-    print("If you are using Vagrant, you can `vagrant ssh` to enter the Vagrant guest.")
-    sys.exit(1)
+from typing import List
+
+# check for the venv
+from lib import sanity_check
+sanity_check.check_venv(__file__)
+
+from zulint import lister
 
 USAGE = '''
     This file greps HTML files for keywords in a context-sensitive manner.
@@ -20,7 +17,7 @@ USAGE = '''
     Example:
 
         $ ./tools/html-grep '#group-pms' '.filters'
-        templates/zerver/right-sidebar.html 45
+        templates/zerver/right_sidebar.html 45
 
             div.right-sidebar#right-sidebar
                 div#group-pm-list
@@ -44,40 +41,41 @@ USAGE = '''
     Finding files to search:
 
         The tool currently searches your git repo for files with
-        the extension .html or .handlebars., and then it does
+        the extension .html or .hbs., and then it does
         the grep against all those files.
 
-        TODO: allow specific files to be searched.
-    '''
+        TODO: allow specific files to be searched.'''
 
 def check_our_files():
     # type: () -> None
 
-    parser = optparse.OptionParser(usage=USAGE)
-    parser.add_option('--modified', '-m',
-        action='store_true', default=False,
-        help='Only check modified files')
-    parser.add_option('--no-filter', '-a',
-        dest='show_all',
-        action='store_true', default=False,
-        help='Show all HTML files (no filtering)')
-    (options, args) = parser.parse_args()
+    parser = argparse.ArgumentParser(description=USAGE,
+                                     formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('--modified', '-m',
+                        action='store_true', default=False,
+                        help='Only check modified files')
+    parser.add_argument('--no-filter', '-a',
+                        dest='show_all',
+                        action='store_true', default=False,
+                        help='Show all HTML files (no filtering)')
+    parser.add_argument("keyword", nargs="*", help='keyword to be searched')
+    options = parser.parse_args()
 
     if options.show_all:
-        keywords = [] # type: List[str]
+        keywords = []  # type: List[str]
     else:
-        if not args:
+        if not options.keyword:
             print('No keywords specified...try --help or --no-filter')
             sys.exit(1)
         else:
-            keywords = args
+            keywords = options.keyword
 
     files = lister.list_files(
         modified_only=options.modified,
-        ftypes=['handlebars', 'html'],
+        ftypes=['hbs', 'html'],
     )
 
-    fns = [fn for fn in files if (not 'casperjs' in fn) and (not 'puppet/zulip' in fn)]
+    fns = [fn for fn in files if ('casperjs' not in fn) and ('puppet/zulip' not in fn)]
     grep(fns, set(keywords))
 
 if __name__ == '__main__':

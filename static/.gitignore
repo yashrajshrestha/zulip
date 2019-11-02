@@ -1,2 +1,16 @@
-min/
-source-map/
+# Code
+/webpack-bundles
+
+# Generated static files
+
+# Copied zulip_bots package
+/generated/bots/
+# From emoji
+/generated/emoji
+# From passing pygments data to the frontend
+/generated/pygments_data.js
+# From `tools/update-authors-json`
+/generated/github-contributors.json
+
+# Legacy emoji data directory
+/third/emoji-data
